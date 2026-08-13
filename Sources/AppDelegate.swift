@@ -65,29 +65,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             }
             .store(in: &cancellables)
 
-        NotificationCenter.default.publisher(for: .whisperNeedsAccessibilityForPaste)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.controller.status = "Enable Accessibility for Whisper so text auto-pastes"
-                self?.controller.stage = .error("Enable Accessibility to auto-paste")
-                Paster.openAccessibilitySettings()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
-                }
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .whisperNeedsAutomationForPaste)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.controller.status = "Allow Automation → System Events for Whisper"
-                self?.controller.stage = .error("Enable Automation (System Events)")
-                Paster.openAutomationSettings()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
-                }
-            }
-            .store(in: &cancellables)
+        // Do NOT auto-open Settings on paste failure — that steals focus and breaks paste.
+        // User can use menu → Fix Accessibility… when needed.
     }
 
     // MARK: - Status bar
@@ -299,13 +278,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             controller.status = "Test paste sent — check the focused app"
             controller.stage = .done("Test paste")
         case .copiedOnly:
-            if FocusMemory.current?.bundleIdentifier == Bundle.main.bundleIdentifier {
-                controller.status = "Test: focus another app’s text field first"
-            } else if !Paster.isAccessibilityTrusted {
-                controller.status = "Test: copied only — enable Accessibility, then Restart"
-            } else {
-                controller.status = "Test: copied only — click a text field, or allow Automation"
-            }
+            controller.status = "Test: focus another app’s text field first"
             controller.stage = .copied
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in

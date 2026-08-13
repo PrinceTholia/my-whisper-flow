@@ -88,7 +88,6 @@ class DictationController: ObservableObject {
                 self.processing = false
 
                 let outcome = Paster.paste(final)
-                // Learner must run after delayed paste settles (not on optimistic return)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     DictionaryLearner.watchAfterPaste(final)
                 }
@@ -98,13 +97,8 @@ class DictationController: ObservableObject {
                     self.status = "✅ Pasted"
                     self.stage = .done(snippet.isEmpty ? "Pasted" : snippet)
                 case .copiedOnly:
-                    if !Paster.isAccessibilityTrusted {
-                        self.status = "Copied — enable Accessibility to auto-paste"
-                        self.stage = .copied
-                    } else {
-                        self.status = "Copied — press ⌘V to paste"
-                        self.stage = .copied
-                    }
+                    self.status = "Copied — press ⌘V to paste"
+                    self.stage = .copied
                 }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + (outcome == .copiedOnly ? 2.8 : 1.0)) { [weak self] in

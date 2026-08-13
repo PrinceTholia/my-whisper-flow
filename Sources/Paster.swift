@@ -15,15 +15,15 @@ enum FocusMemory {
 }
 
 enum PasteOutcome: Equatable {
-    /// Accessibility trusted — simulated ⌘V was scheduled.
     case inserted
-    /// Clipboard only (no AX trust, or no valid target). User may need ⌘V / Fix Accessibility.
     case copiedOnly
 }
 
-/// Clipboard + paste.
-/// Normal apps: never activateIgnoringOtherApps. Prefer simulated ⌘V when AX is trusted.
-/// When AX is off: clipboard + System Events only, and report `.copiedOnly` honestly.
+/// Clipboard + auto-paste (known-good behavior).
+///
+/// Critical: never open System Settings during paste — that steals focus and
+/// makes ⌘V land nowhere. Also: do not gate on `AXIsProcessTrusted()` alone;
+/// ad-hoc builds often report false even when Accessibility is enabled.
 enum Paster {
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -40,8 +40,20 @@ enum Paster {
     private static let didPromptKey = "whisper.didPromptAccessibility"
     private static let didAttemptPromptKey = "whisper.didAttemptAXPrompt"
     private static let exeTokenKey = "whisper.executableToken"
-    private static var didNudgeAXThisSession = false
-    private static var didNudgeAutomationThisSession = false
+
+    /// True when Accessibility APIs actually respond (stronger than AXIsProcessTrusted for ad-hoc).
+    static var canUseAccessibilityAPIs: Bool {
+        if AXIsProcessTrusted() { return true }
+        let system = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        )
+        // .apiDisabled means TCC denied this binary; anything else means APIs are usable
+        return err != .apiDisabled
+    }
+
+    static var isAccessibilityTrusted: Bool { canUseAccessibilityAPIs }
 
     @discardableResult
     static func paste(_ text: String) -> PasteOutcome {
@@ -56,44 +68,28 @@ enum Paster {
             return .copiedOnly
         }
 
-        let axTrusted = AXIsProcessTrusted()
-        if !axTrusted {
-            nudgeAccessibilityIfNeeded()
-        }
-
         if isTerminalApp(target) {
-            pasteIntoTerminal(app: target, axTrusted: axTrusted)
-            return axTrusted ? .inserted : .copiedOnly
-        }
-
-        // Normal apps — do NOT activateIgnoringOtherApps (breaks caret / paste).
-        if axTrusted {
-            // HID ⌘V only — avoid System Events double-insert when both succeed
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                simulateCommandV()
-            }
+            pasteIntoTerminal(app: target)
             return .inserted
         }
 
-        // AX off: still try Automation (System Events); UI must not claim "Pasted"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if !pasteViaSystemEvents(processName: nil) {
-                nudgeAutomationIfNeeded()
+        // Normal apps: NEVER open Settings here (steals focus).
+        // NEVER skip paste because AXIsProcessTrusted() lied.
+        // Do NOT activateIgnoringOtherApps — that breaks caret focus.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            // 1) Prefer direct AX insert when APIs work
+            if insertViaAccessibility(text) {
+                print("✅ Paste via AX insert")
+                return
+            }
+            // 2) Simulated ⌘V (needs Accessibility TCC for this binary)
+            simulateCommandV()
+            // 3) System Events backup after a beat (needs Automation)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                _ = pasteViaSystemEvents(processName: target?.localizedName)
             }
         }
-        return .copiedOnly
-    }
-
-    private static func nudgeAccessibilityIfNeeded() {
-        guard !didNudgeAXThisSession else { return }
-        didNudgeAXThisSession = true
-        NotificationCenter.default.post(name: .whisperNeedsAccessibilityForPaste, object: nil)
-    }
-
-    private static func nudgeAutomationIfNeeded() {
-        guard !didNudgeAutomationThisSession else { return }
-        didNudgeAutomationThisSession = true
-        NotificationCenter.default.post(name: .whisperNeedsAutomationForPaste, object: nil)
+        return .inserted
     }
 
     private static func isTerminalApp(_ app: NSRunningApplication?) -> Bool {
@@ -106,25 +102,36 @@ enum Paster {
             || name.contains("wezterm") || name.contains("hyper")
     }
 
-    private static func pasteIntoTerminal(app: NSRunningApplication?, axTrusted: Bool) {
+    private static func pasteIntoTerminal(app: NSRunningApplication?) {
         let processName = app?.localizedName ?? "Terminal"
         app?.activate(options: [.activateIgnoringOtherApps])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             if pasteViaMenu(processName: processName) { return }
             if pasteViaSystemEvents(processName: processName) { return }
-            if axTrusted {
-                simulateCommandV()
-            } else {
-                nudgeAutomationIfNeeded()
-            }
+            simulateCommandV()
         }
     }
 
     @discardableResult
+    private static func insertViaAccessibility(_ text: String) -> Bool {
+        let system = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        ) == .success, let focusedRef else { return false }
+
+        let el = focusedRef as! AXUIElement
+        if AXUIElementSetAttributeValue(
+            el, kAXSelectedTextAttribute as CFString, text as CFTypeRef
+        ) == .success {
+            return true
+        }
+        return false
+    }
+
+    @discardableResult
     private static func pasteViaMenu(processName: String) -> Bool {
-        let escaped = processName
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = escapeAppleScript(processName)
         let script = """
         tell application "System Events"
           tell process "\(escaped)"
@@ -142,10 +149,7 @@ enum Paster {
         """
         var err: NSDictionary?
         let result = NSAppleScript(source: script)?.executeAndReturnError(&err)
-        if err != nil {
-            print("⚠️ System Events menu paste: \(err!)")
-            return false
-        }
+        if err != nil { return false }
         return result?.stringValue == "ok"
     }
 
@@ -160,6 +164,7 @@ enum Paster {
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
+        usleep(12_000)
         up.post(tap: .cghidEventTap)
     }
 
@@ -167,9 +172,7 @@ enum Paster {
     private static func pasteViaSystemEvents(processName: String?) -> Bool {
         let script: String
         if let processName {
-            let escaped = processName
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
+            let escaped = escapeAppleScript(processName)
             script = """
             tell application "System Events"
               tell process "\(escaped)"
@@ -194,6 +197,11 @@ enum Paster {
         return true
     }
 
+    private static func escapeAppleScript(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     static func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
@@ -208,9 +216,7 @@ enum Paster {
         }
     }
 
-    static var isAccessibilityTrusted: Bool { AXIsProcessTrusted() }
-
-    /// New binary → Accessibility grant may not apply. Re-prompt once per binary.
+    /// Launch-only soft prompt — never during paste.
     static func refreshTrustPromptIfBinaryChanged() {
         guard let exe = Bundle.main.executableURL,
               let attrs = try? FileManager.default.attributesOfItem(atPath: exe.path),
@@ -233,9 +239,9 @@ enum Paster {
             UserDefaults.standard.set(true, forKey: didPromptKey)
             return
         }
-        // One attempt per binary — do not mark "granted" unless trusted
         if UserDefaults.standard.bool(forKey: didAttemptPromptKey) { return }
         UserDefaults.standard.set(true, forKey: didAttemptPromptKey)
+        // Prompt dialog only — do not open System Settings window (steals focus later)
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
         if AXIsProcessTrusted() {
@@ -251,9 +257,7 @@ enum Paster {
               return name of first process whose frontmost is true
             end tell
             """)?.executeAndReturnError(&err)
-            if err != nil {
-                DispatchQueue.main.async { nudgeAutomationIfNeeded() }
-            }
+            if let err { print("⚠️ Automation warm-up: \(err)") }
         }
     }
 }
