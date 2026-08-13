@@ -21,9 +21,9 @@ enum PasteOutcome: Equatable {
 
 /// Clipboard + auto-paste into the app that was focused when recording started.
 ///
-/// Ad-hoc builds often make `AXIsProcessTrusted()` lie. Never treat that as
-/// “no caret / no permission” and skip paste. Prefer System Events ⌘V (Automation)
-/// over synthetic typing, which can “succeed” while events are silently dropped.
+/// Do NOT gate on `hasActiveTextTarget()` — Electron/Cursor/Chrome often fail that
+/// check even with a real caret, which forced “copy only” and manual ⌘V forever.
+/// Do NOT call `activateIgnoringOtherApps` on normal apps — it steals caret focus.
 enum Paster {
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -49,93 +49,63 @@ enum Paster {
         pb.setString(text, forType: .string)
 
         let target = FocusMemory.current ?? NSWorkspace.shared.frontmostApplication
-        if target?.bundleIdentifier == Bundle.main.bundleIdentifier || target == nil {
+        if target == nil || target?.bundleIdentifier == Bundle.main.bundleIdentifier {
             print("📋 No target app — copied only")
-            return .copiedOnly
-        }
-
-        // Only skip when AX truly works and confirms there is no text caret
-        if AXIsProcessTrusted(), !hasActiveTextTarget() {
-            print("📋 No active cursor — copied only")
             return .copiedOnly
         }
 
         let processName = target?.localizedName
         let terminal = isTerminalApp(target)
+        let alreadyFront = target == NSWorkspace.shared.frontmostApplication
 
-        // Bring the original app forward so paste lands in the caret the user had
-        target?.activate(options: [.activateIgnoringOtherApps])
+        // Terminals often need a hard activate; normal apps keep caret if left alone.
+        if terminal {
+            target?.activate(options: [.activateIgnoringOtherApps])
+        } else if !alreadyFront {
+            // Soft bring-forward without killing the text field focus if possible
+            target?.activate(options: [])
+        }
 
-        let delay: TimeInterval = terminal ? 0.30 : 0.18
+        // Fn release / hands-free stop needs a beat before synthetic ⌘V is accepted
+        let delay: TimeInterval = terminal ? 0.35 : 0.28
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            // 1) Real Accessibility insert (best when TCC matches this binary)
-            if insertViaAccessibility(text) {
-                print("✅ Paste via Accessibility insert")
-                return
-            }
-
-            // 2) System Events ⌘V into the target process (needs Automation permission)
-            if let processName, pasteViaSystemEventsOsascript(processName: processName) {
-                print("✅ Paste via System Events (\(processName))")
-                return
-            }
-
-            // 3) Edit → Paste menu (Terminals especially)
-            if let processName, pasteViaMenu(processName: processName) {
-                print("✅ Paste via Edit menu")
-                return
-            }
-
-            // 4) Synthetic ⌘V + generic System Events
-            simulateCommandV()
-            _ = pasteViaSystemEventsOsascript(processName: nil)
-            print("✅ Paste via synthetic ⌘V fallback")
+            deliver(text: text, processName: processName, terminal: terminal)
         }
         return .inserted
     }
 
-    static func hasActiveTextTarget() -> Bool {
-        guard AXIsProcessTrusted() else { return false }
-
-        let system = AXUIElementCreateSystemWide()
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
-        ) == .success, let focusedRef else { return false }
-
-        let el = focusedRef as! AXUIElement
-        var roleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
-        let role = (roleRef as? String) ?? ""
-
-        let nonText: Set<String> = [
-            "AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
-            "AXMenuItem", "AXMenu", "AXMenuBar", "AXMenuBarItem",
-            "AXTab", "AXToolbar", "AXSlider", "AXImage", "AXStaticText", "AXLink",
-        ]
-        if nonText.contains(role) { return false }
-
-        let textRoles: Set<String> = [
-            "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField",
-            "AXEditableText", "AXWebArea",
-        ]
-        if textRoles.contains(role) { return true }
-        if role.localizedCaseInsensitiveContains("text") { return true }
-
-        var rangeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            el, kAXSelectedTextRangeAttribute as CFString, &rangeRef
-        ) == .success, rangeRef != nil {
-            return true
+    private static func deliver(text: String, processName: String?, terminal: Bool) {
+        // 1) Accessibility caret insert
+        if insertViaAccessibility(text) {
+            print("✅ Paste via Accessibility insert")
+            return
         }
 
-        var settable = DarwinBoolean(false)
-        if AXUIElementIsAttributeSettable(el, kAXSelectedTextAttribute as CFString, &settable) == .success,
-           settable.boolValue {
-            return true
+        // 2) Synthetic ⌘V (works when Accessibility grants HID posting)
+        simulateCommandV()
+        usleep(40_000)
+        simulateCommandV()
+
+        // 3) System Events → named process (Automation permission)
+        if let processName {
+            if pasteViaNSAppleScript(processName: processName) {
+                print("✅ Paste via NSAppleScript (\(processName))")
+                return
+            }
+            if pasteViaSystemEventsOsascript(processName: processName) {
+                print("✅ Paste via osascript (\(processName))")
+                return
+            }
+            if pasteViaMenu(processName: processName) {
+                print("✅ Paste via Edit menu")
+                return
+            }
         }
 
-        return isTerminalApp(FocusMemory.current)
+        // 4) Generic System Events ⌘V
+        _ = pasteViaNSAppleScript(processName: nil)
+        _ = pasteViaSystemEventsOsascript(processName: nil)
+        print("✅ Paste fallbacks fired (clipboard ready if HID blocked)")
     }
 
     // MARK: - Insert strategies
@@ -197,11 +167,41 @@ enum Paster {
         let v = CGKeyCode(kVK_ANSI_V)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true),
               let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false) else { return }
+        // Only ⌘ — clear any leftover Fn/globe from the hotkey
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
-        usleep(12_000)
+        usleep(15_000)
         up.post(tap: .cghidEventTap)
+    }
+
+    @discardableResult
+    private static func pasteViaNSAppleScript(processName: String?) -> Bool {
+        let script: String
+        if let processName {
+            let escaped = escapeAppleScript(processName)
+            script = """
+            tell application "System Events"
+              tell process "\(escaped)"
+                set frontmost to true
+                keystroke "v" using command down
+              end tell
+            end tell
+            """
+        } else {
+            script = """
+            tell application "System Events"
+              keystroke "v" using command down
+            end tell
+            """
+        }
+        var err: NSDictionary?
+        NSAppleScript(source: script)?.executeAndReturnError(&err)
+        if let err {
+            print("⚠️ NSAppleScript: \(err)")
+            return false
+        }
+        return true
     }
 
     @discardableResult
@@ -221,7 +221,6 @@ enum Paster {
         return runOsascript(script) == "ok"
     }
 
-    /// Returns true when osascript exits 0 (best-effort — System Events may still need Automation).
     @discardableResult
     private static func pasteViaSystemEventsOsascript(processName: String?) -> Bool {
         let script: String
@@ -299,7 +298,6 @@ enum Paster {
         }
     }
 
-    /// New binary (ad-hoc rebuild) → old Accessibility grant may not apply. Re-prompt.
     static func refreshTrustPromptIfBinaryChanged() {
         guard let exe = Bundle.main.executableURL,
               let attrs = try? FileManager.default.attributesOfItem(atPath: exe.path),
@@ -325,14 +323,14 @@ enum Paster {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
-    /// Warm Automation permission (System Events) without pasting user data.
     static func warmAutomationPermission() {
         DispatchQueue.global().async {
-            _ = runOsascript("""
+            var err: NSDictionary?
+            NSAppleScript(source: """
             tell application "System Events"
               return name of first process whose frontmost is true
             end tell
-            """)
+            """)?.executeAndReturnError(&err)
         }
     }
 }

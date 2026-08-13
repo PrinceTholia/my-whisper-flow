@@ -69,9 +69,11 @@ struct SettingsView: View {
 
                     Text("1. Keyboard → Dictation → Shortcut → Off (macOS Dictation steals Fn twice, pauses music, shows fake live text).")
                         .font(.caption2).foregroundColor(.secondary)
-                    Text("2. Privacy → Accessibility → remove old Whisper → add /Applications/Whisper.app → ON → Quit & reopen Whisper.")
+                    Text("2. Privacy → Accessibility → remove old Whisper → add /Applications/Whisper.app → ON → use Restart Whisper (menu).")
                         .font(.caption2).foregroundColor(.secondary)
                     Text("3. Privacy → Automation → Whisper → System Events ON (needed for auto-paste).")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Text("Whisper no longer skips paste when caret detection fails (that forced manual ⌘V in Cursor/Chrome).")
                         .font(.caption2).foregroundColor(.secondary)
 
                     HStack(spacing: 8) {

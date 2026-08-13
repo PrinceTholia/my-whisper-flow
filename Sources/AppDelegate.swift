@@ -133,6 +133,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         about.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
         menu.addItem(about)
 
+        menu.addItem(.separator())
+
+        let restart = NSMenuItem(title: "Restart Whisper", action: #selector(restartApp), keyEquivalent: "r")
+        restart.target = self
+        restart.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        menu.addItem(restart)
+
         let quit = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
@@ -234,7 +241,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         alert.informativeText = """
         1. Accessibility → remove old Whisper rows → add /Applications/Whisper.app → ON
         2. Automation → Whisper → enable System Events
-        3. Quit Whisper from the menu bar, then open it again
+        3. Menu bar → Restart Whisper
 
         After each rebuild you may need step 1 again (ad-hoc signature changes).
         """
@@ -250,6 +257,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             self?.controller.stage = .idle
         }
+    }
+
+    @objc private func restartApp() {
+        let path = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Brief delay so this process can exit cleanly before relaunch
+        task.arguments = ["-c", "sleep 0.6; /usr/bin/open \"\(path)\""]
+        try? task.run()
+        NSApp.terminate(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
