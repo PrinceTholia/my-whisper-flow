@@ -82,16 +82,13 @@ class DictationController: ObservableObject {
         let finishOnMain: (String) -> Void = { [weak self] text in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                // แม้ correction ปิดอยู่ หรือ LLM มองข้ามคำเฉพาะ ก็ให้ dictionary เป็นเจ้าบทบาทสุดท้าย
                 let final = CorrectionDictionary.shared.apply(to: text)
                 let snippet = String(final.prefix(28))
                 self.status = "✅ " + snippet
-                // Hide overlay before paste so the target field keeps focus
                 self.stage = .idle
                 self.processing = false
                 Paster.paste(final)
                 DictionaryLearner.watchAfterPaste(final)
-                // Brief confirmation via tooltip only (no blocking overlay)
                 self.status = "✅ Pasted: " + snippet
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                     guard let self = self else { return }
@@ -100,35 +97,54 @@ class DictationController: ObservableObject {
             }
         }
 
-        let afterSTT: (String?) -> Void = { [weak self] result in
-            guard let self = self else { return }
-            // ลบคำบรรยายเสียง/เหตุการณ์ที่ STT เติมมา เช่น (เสียงลม) (wind) [background noise]
-            let text = (result.map { self.stripSoundAnnotations($0) }) ?? ""
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                DispatchQueue.main.async {
-                    self.status = "⚠️ No audio detected"
-                    self.stage = .error("No audio detected")
-                    self.processing = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                        if self?.stage == .error("No audio detected") { self?.stage = .idle }
-                    }
-                }
-                return
+        let failOnMain: (DictationAPIError) -> Void = { [weak self] err in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.processing = false
+                self.showAPIError(err)
             }
-            if self.useCorrection {
-                DispatchQueue.main.async {
-                    self.status = "✨ AI correction…"
-                    self.stage = .correcting
+        }
+
+        let afterSTT: (Result<String, DictationAPIError>) -> Void = { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .failure(let err):
+                failOnMain(err)
+            case .success(let raw):
+                let text = self.stripSoundAnnotations(raw)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    failOnMain(.emptyResponse)
+                    return
                 }
-                self.correction.correct(
-                    text: text,
-                    language: lang,
-                    backtrack: UserDefaults.standard.bool(forKey: Self.backtrackKey)
-                ) { corrected in
-                    finishOnMain(corrected ?? text)
+                if self.useCorrection {
+                    DispatchQueue.main.async {
+                        self.status = "✨ AI correction…"
+                        self.stage = .correcting
+                    }
+                    self.correction.correct(
+                        text: text,
+                        language: lang,
+                        backtrack: UserDefaults.standard.bool(forKey: Self.backtrackKey)
+                    ) { corr in
+                        switch corr {
+                        case .success(let cleaned):
+                            finishOnMain(cleaned)
+                        case .failure(let err):
+                            // Hard-fail on rate limits so the user sees the wait time.
+                            // Soft-fail other cleanup errors: still paste the raw transcript.
+                            if case .rateLimited = err {
+                                failOnMain(err)
+                            } else if case .http(let status, _, _) = err, status == 429 {
+                                failOnMain(err)
+                            } else {
+                                print("⚠️ Correction failed (\(err.detailMessage)); pasting raw transcript")
+                                finishOnMain(text)
+                            }
+                        }
+                    }
+                } else {
+                    finishOnMain(text)
                 }
-            } else {
-                finishOnMain(text)
             }
         }
 
@@ -144,9 +160,57 @@ class DictationController: ObservableObject {
             }
         } else {
             whisper.language = lang
-            whisper.transcribe(fileURL: url) { result in afterSTT(result) }
+            whisper.transcribe(fileURL: url) { result in
+                if let result {
+                    afterSTT(.success(result))
+                } else {
+                    afterSTT(.failure(.emptyResponse))
+                }
+            }
         }
     }
+
+    /// Show a clear pill + tooltip; for rate limits, countdown so the user knows to wait.
+    private func showAPIError(_ err: DictationAPIError) {
+        status = err.detailMessage
+        stage = .error(err.pillMessage)
+        print("❌ Dictation: \(err.detailMessage)")
+
+        // Countdown for rate limits
+        if case .rateLimited(let sec, _) = err {
+            var left = Int(ceil(sec))
+            let token = UUID().uuidString
+            statusItemToken = token
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] timer in
+                guard let self = self, self.statusItemToken == token else {
+                    timer.invalidate(); return
+                }
+                left -= 1
+                if left <= 0 {
+                    timer.invalidate()
+                    self.status = "Ready — try again"
+                    self.stage = .idle
+                    return
+                }
+                self.stage = .error("Rate limit — wait ~\(left)s")
+                self.status = "Groq limit — please wait \(left)s, then dictate again"
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            return
+        }
+
+        let hold = err.displaySeconds
+        let msg = err.pillMessage
+        DispatchQueue.main.asyncAfter(deadline: .now() + hold) { [weak self] in
+            guard let self = self else { return }
+            if case .error(let m) = self.stage, m == msg {
+                self.stage = .idle
+            }
+        }
+    }
+
+    /// Cancels stale rate-limit timers when a new error arrives.
+    private var statusItemToken: String? = nil
 
     /// ลบคำบรรยายเสียง/เหตุการณ์ที่ STT ใส่มา เช่น (เสียงลม) (wind noise) [applause] *laughs*
     /// แบบที่ ElevenLabs Scribe และ Whisper มักแทรกเข้ามา

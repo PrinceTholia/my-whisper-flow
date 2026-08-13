@@ -1,33 +1,28 @@
 import Foundation
 
-/// Transcribe audio via cloud STT — supports multiple providers (ElevenLabs Scribe / OpenAI / Groq / Custom)
-/// via STTSettings — see STTProvider.swift
+/// Transcribe audio via cloud STT — supports multiple providers via STTSettings.
 class CloudTranscriptionService {
     private var provider: STTProvider { STTSettings.current }
 
     var isAvailable: Bool { STTSettings.key(for: provider) != nil }
 
-    /// Convert app language → language code based on provider style.
-    /// - elevenlabs uses ISO 639-3 (tha/eng)  ·  openAI/Groq uses ISO 639-1 (th/en)
-    /// - "auto" → nil (let the provider auto-detect)
     private func langCode(_ language: String, style: STTProvider.Style) -> String? {
         guard let lang = Languages.find(language) else { return nil }
         if lang.code == "auto" { return nil }
         return (style == .elevenlabs) ? lang.iso3 : lang.code
     }
 
-    func transcribe(fileURL: URL, language: String, completion: @escaping (String?) -> Void) {
+    func transcribe(fileURL: URL, language: String,
+                    completion: @escaping (Result<String, DictationAPIError>) -> Void) {
         let p = provider
         guard let key = STTSettings.key(for: p) else {
-            print("❌ No key found for \(p.name) (configure in Settings or set env \(p.envKey))")
-            completion(nil); return
+            completion(.failure(.noAPIKey(provider: p.name))); return
         }
         guard let endpoint = STTSettings.endpoint(for: p) else {
-            print("❌ Invalid endpoint for \(p.name)")
-            completion(nil); return
+            completion(.failure(.network("Invalid endpoint"))); return
         }
-        guard let fileData = try? Data(contentsOf: fileURL) else {
-            completion(nil); return
+        guard let fileData = try? Data(contentsOf: fileURL), !fileData.isEmpty else {
+            completion(.failure(.emptyResponse)); return
         }
 
         let boundary = "Boundary-\(UUID().uuidString)"
@@ -35,7 +30,6 @@ class CloudTranscriptionService {
         req.httpMethod = "POST"
         req.timeoutInterval = 120
 
-        // Auth header + field names vary by style
         switch p.style {
         case .elevenlabs:
             req.setValue(key, forHTTPHeaderField: "xi-api-key")
@@ -51,7 +45,6 @@ class CloudTranscriptionService {
             body.append("\(value)\r\n".data(using: .utf8)!)
         }
 
-        // Field names differ: ElevenLabs = model_id/language_code, OpenAI-style = model/language
         let modelField = (p.style == .elevenlabs) ? "model_id" : "model"
         let langField  = (p.style == .elevenlabs) ? "language_code" : "language"
 
@@ -60,7 +53,6 @@ class CloudTranscriptionService {
             field(langField, lang)
         }
 
-        // Audio file
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
         body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
@@ -68,22 +60,29 @@ class CloudTranscriptionService {
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         req.httpBody = body
 
-        URLSession.shared.dataTask(with: req) { data, _, error in
+        URLSession.shared.dataTask(with: req) { data, response, error in
             if let error = error {
-                print("❌ \(p.name) error: \(error.localizedDescription)")
-                completion(nil); return
+                completion(.failure(.network(error.localizedDescription))); return
+            }
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
+            if status == 0 {
+                completion(.failure(.network("No response"))); return
+            }
+            if !(200...299).contains(status) {
+                completion(.failure(.fromHTTP(status: status, data: data, headers: http?.allHeaderFields)))
+                return
             }
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                completion(nil); return
+                completion(.failure(.emptyResponse)); return
             }
-            // Both styles return { "text": "..." }
             if let text = json["text"] as? String {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                completion(trimmed.isEmpty ? nil : trimmed)
+                completion(trimmed.isEmpty ? .failure(.emptyResponse) : .success(trimmed))
             } else {
                 print("❌ \(p.name) response: \(json)")
-                completion(nil)
+                completion(.failure(.fromHTTP(status: status, data: data, headers: http?.allHeaderFields)))
             }
         }.resume()
     }

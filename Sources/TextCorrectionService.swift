@@ -13,14 +13,13 @@ class TextCorrectionService: ObservableObject {
     var isAvailable: Bool { apiKey != nil }
 
     func correct(text: String, language: String, backtrack: Bool = false,
-                 completion: @escaping (String?) -> Void) {
+                 completion: @escaping (Result<String, DictationAPIError>) -> Void) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            completion(nil); return
+            completion(.failure(.emptyResponse)); return
         }
         let p = provider
         guard let key = LLMSettings.key(for: p) else {
-            print("❌ No key found for \(p.name) (configure in Settings or set env \(p.envKey))")
-            completion(nil); return
+            completion(.failure(.noAPIKey(provider: p.name))); return
         }
 
         let langHint: String
@@ -58,9 +57,6 @@ class TextCorrectionService: ObservableObject {
             """
         }
 
-        // User's own known corrections — helps with proper nouns / brand names the model
-        // wouldn't otherwise know. (A deterministic pass also runs before paste, so exact
-        // matches always land even if the model ignores this.)
         let hint = CorrectionDictionary.shared.hintForPrompt
         if !hint.isEmpty {
             systemPrompt += "\n\nThe user's own known corrections for their speech — apply these where the meaning matches:\n" + hint
@@ -98,7 +94,6 @@ class TextCorrectionService: ObservableObject {
                     ["role": "user", "content": text],
                 ],
             ]
-            // GLM-5 enables thinking by default → disable for fast text correction
             if model.lowercased().contains("glm") {
                 anthropicBody["thinking"] = ["type": "disabled"]
             }
@@ -106,36 +101,52 @@ class TextCorrectionService: ObservableObject {
         }
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
-            completion(nil); return
+            completion(.failure(.network("Could not build request"))); return
         }
         req.httpBody = httpBody
 
         DispatchQueue.main.async { self.isCorrecting = true }
 
         let style = p.style
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
             DispatchQueue.main.async { self?.isCorrecting = false }
 
             if let error = error {
-                print("❌ Correction error: \(error.localizedDescription)")
-                completion(nil); return
+                completion(.failure(.network(error.localizedDescription))); return
+            }
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
+            if status != 0 && !(200...299).contains(status) {
+                completion(.failure(.fromHTTP(status: status, data: data, headers: http?.allHeaderFields)))
+                return
             }
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                print("❌ Correction: could not parse response")
-                completion(nil); return
+                completion(.failure(.emptyResponse)); return
+            }
+
+            // Groq may return error payload with 200 in rare cases
+            if let err = json["error"] as? [String: Any] {
+                let msg = (err["message"] as? String) ?? "LLM error"
+                let type = ((err["type"] as? String) ?? "").lowercased()
+                if type.contains("rate_limit") || msg.lowercased().contains("rate limit") {
+                    completion(.failure(.fromHTTP(status: 429, data: data, headers: http?.allHeaderFields)))
+                } else {
+                    completion(.failure(.http(status: status == 0 ? 400 : status, message: msg, retryAfter: nil)))
+                }
+                return
             }
 
             let content = Self.extractText(from: json, style: style)
             guard let raw = content else {
                 print("❌ Correction response: \(json)")
-                completion(nil); return
+                completion(.failure(.emptyResponse)); return
             }
 
             let cleaned = raw
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            completion(cleaned.isEmpty ? nil : cleaned)
+            completion(cleaned.isEmpty ? .failure(.emptyResponse) : .success(cleaned))
         }.resume()
     }
 
