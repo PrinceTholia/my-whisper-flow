@@ -64,6 +64,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
                 self?.controller.status = "📚 Learned: \(summary)"
             }
             .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .whisperNeedsAccessibilityForPaste)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.controller.status = "Enable Accessibility for Whisper so text auto-pastes"
+                self?.controller.stage = .error("Enable Accessibility to auto-paste")
+                Paster.openAccessibilitySettings()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .whisperNeedsAutomationForPaste)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.controller.status = "Allow Automation → System Events for Whisper"
+                self?.controller.stage = .error("Enable Automation (System Events)")
+                Paster.openAutomationSettings()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Status bar
@@ -232,6 +256,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     }
 
     @objc private func fixAccessibility() {
+        if Paster.isAccessibilityTrusted {
+            let alert = NSAlert()
+            alert.messageText = "Accessibility looks enabled"
+            alert.informativeText = "Click a text field in another app, then use Test Auto-Paste. If that still fails: remove Whisper from Accessibility, add /Applications/Whisper.app again, then Restart Whisper. Also enable Automation → System Events."
+            alert.addButton(withTitle: "Test Auto-Paste")
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Cancel")
+            let r = alert.runModal()
+            if r == .alertFirstButtonReturn {
+                testAutoPaste()
+            } else if r == .alertSecondButtonReturn {
+                Paster.openAccessibilitySettings()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    Paster.openAutomationSettings()
+                }
+            }
+            return
+        }
         Paster.openAccessibilitySettings()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             Paster.openAutomationSettings()
@@ -252,20 +294,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     @objc private func testAutoPaste() {
         FocusMemory.capture()
         let outcome = Paster.paste("Whisper auto-paste OK")
-        controller.status = outcome == .inserted ? "Test paste sent — check the focused app" : "Test: copied only (click a text field first)"
-        controller.stage = outcome == .inserted ? .done("Test paste") : .copied
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.controller.stage = .idle
+        switch outcome {
+        case .inserted:
+            controller.status = "Test paste sent — check the focused app"
+            controller.stage = .done("Test paste")
+        case .copiedOnly:
+            if FocusMemory.current?.bundleIdentifier == Bundle.main.bundleIdentifier {
+                controller.status = "Test: focus another app’s text field first"
+            } else if !Paster.isAccessibilityTrusted {
+                controller.status = "Test: copied only — enable Accessibility, then Restart"
+            } else {
+                controller.status = "Test: copied only — click a text field, or allow Automation"
+            }
+            controller.stage = .copied
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self = self else { return }
+            if case .done = self.controller.stage { self.controller.stage = .idle }
+            if case .copied = self.controller.stage { self.controller.stage = .idle }
         }
     }
 
     @objc private func restartApp() {
         let path = Bundle.main.bundlePath
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // Brief delay so this process can exit cleanly before relaunch
-        task.arguments = ["-c", "sleep 0.6; /usr/bin/open \"\(path)\""]
-        try? task.run()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        // "$1" keeps spaces/quotes safe — no string interpolation into the shell script body
+        task.arguments = ["-c", "sleep 0.6; exec /usr/bin/open \"$1\"", "--", path]
+        do {
+            try task.run()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Could not schedule restart"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return
+        }
         NSApp.terminate(nil)
     }
 
@@ -365,6 +429,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
                 guard let self = self else { return }
                 if active {
                     self.controller.status = "Hands-free — tap Fn to stop"
+                } else if self.controller.status.hasPrefix("Hands-free") {
+                    self.controller.status = ""
                 }
             }
         }

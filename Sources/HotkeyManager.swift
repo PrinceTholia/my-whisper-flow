@@ -103,6 +103,9 @@ class HotkeyManager {
     func start() { restartMonitors() }
 
     func stop() {
+        pendingHoldStop?.cancel()
+        pendingHoldStop = nil
+        handsFreeActive = false
         if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
         if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
     }
