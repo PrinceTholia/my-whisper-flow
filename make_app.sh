@@ -60,8 +60,20 @@ if [ -n "$DEV_ID" ]; then
         --entitlements WhisperApp.entitlements \
         --sign "$DEV_ID" "$APP_BUNDLE"
 else
-    echo "✍️  Code signing (ad-hoc) — แนะนำให้ติดตั้ง Developer ID cert เพื่อสิทธิ์คงที่"
-    codesign --force --deep --sign - "$APP_BUNDLE"
+    echo "✍️  Code signing (ad-hoc) — stable identity for Accessibility TCC"
+    # Sign Sparkle nested first (if present), then the app — avoid --deep ambiguity
+    if [ -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" ]; then
+        codesign --force --sign - --timestamp=none \
+            "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" 2>/dev/null || true
+        codesign --force --sign - --timestamp=none \
+            "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
+    fi
+    codesign --force --sign - --timestamp=none \
+        --entitlements WhisperApp.entitlements \
+        "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    codesign --force --sign - --timestamp=none \
+        --entitlements WhisperApp.entitlements \
+        "$APP_BUNDLE"
 fi
 
 echo "✅ เสร็จ: $APP_BUNDLE"

@@ -67,9 +67,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         NotificationCenter.default.publisher(for: .whisperPasteNeedsAccessibility)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.controller.status = "⚠️ Enable Accessibility — text is on clipboard (⌘V)"
-                self?.controller.stage = .error("Enable Accessibility for auto-paste")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.controller.status = "⚠️ Enable Whisper in Accessibility, then Quit & reopen"
+                self?.controller.stage = .error("Quit & reopen Whisper after enabling Accessibility")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                     if case .error = self?.controller.stage { self?.controller.stage = .idle }
                 }
             }
@@ -141,6 +141,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         dictionary.target = self
         dictionary.image = NSImage(systemSymbolName: "text.book.closed", accessibilityDescription: nil)
         menu.addItem(dictionary)
+
+        let ax = NSMenuItem(title: "Fix Accessibility…", action: #selector(fixAccessibility), keyEquivalent: "")
+        ax.target = self
+        ax.image = NSImage(systemSymbolName: "accessibility", accessibilityDescription: nil)
+        menu.addItem(ax)
 
         let about = NSMenuItem(title: "About Whisper", action: #selector(openAbout), keyEquivalent: "")
         about.target = self
@@ -249,6 +254,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         dictionaryWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func fixAccessibility() {
+        Paster.openAccessibilitySettings()
     }
 
     // Return to menu-bar mode when a window closes (hide from Dock)

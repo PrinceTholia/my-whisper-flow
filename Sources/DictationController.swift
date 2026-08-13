@@ -169,30 +169,35 @@ class DictationController: ObservableObject {
 
 /// Copy text to clipboard and insert into the focused app.
 /// Prefers Accessibility selected-text insert; falls back to ⌘V.
-/// Requires Accessibility — after ad-hoc rebuilds macOS often drops trust until re-enabled.
 enum Paster {
-    private static var didPrompt = false
+    private static var didWarnThisSession = false
 
     static func paste(_ text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        guard AXIsProcessTrusted() else {
-            // Don't spam the system prompt mid-dictation; nudge once per session.
-            promptAccessibilityOnce()
-            print("⚠️ Accessibility off — text left on clipboard (⌘V to paste)")
-            NotificationCenter.default.post(
-                name: .whisperPasteNeedsAccessibility,
-                object: nil
-            )
-            return
+        let trusted = AXIsProcessTrusted()
+
+        // Always attempt insert — don't open System Settings here (steals focus).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            let inserted = insertViaAccessibility(text)
+            if !inserted {
+                simulateCommandV()
+            }
+
+            // Only warn once per launch if Accessibility is still off
+            if !AXIsProcessTrusted(), !didWarnThisSession {
+                didWarnThisSession = true
+                NotificationCenter.default.post(
+                    name: .whisperPasteNeedsAccessibility,
+                    object: nil
+                )
+            }
         }
 
-        // Let the target app regain focus after hotkey release / overlay hide
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if insertViaAccessibility(text) { return }
-            simulateCommandV()
+        if !trusted {
+            print("⚠️ Accessibility may be off — attempted paste; text also on clipboard")
         }
     }
 
@@ -264,30 +269,28 @@ enum Paster {
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
-        // hid tap first; session tap as backup for some sandboxed targets
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            down.post(tap: .cgSessionEventTap)
-            up.post(tap: .cgSessionEventTap)
-        }
     }
 
-    /// Prompt until trusted (safe to call repeatedly; system dialog only when needed).
-    static func promptAccessibilityOnce() {
-        if AXIsProcessTrusted() { return }
-        // Allow a fresh prompt after rebuilds / each cold launch
-        if didPrompt { return }
-        didPrompt = true
+    /// Call from menu / first launch only — never from the paste path.
+    static func openAccessibilitySettings() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        // Also jump to the Accessibility pane so the user can flip Whisper on
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    static func resetPromptFlag() { didPrompt = false }
+    /// Quiet launch check — no Settings window (avoids stealing focus every session).
+    static func promptAccessibilityOnce() {
+        if AXIsProcessTrusted() { return }
+        // Register with TCC silently so Whisper appears in the Accessibility list
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: false] as CFDictionary)
+    }
+
+    static var isTrusted: Bool { AXIsProcessTrusted() }
 }
 
 extension Notification.Name {
