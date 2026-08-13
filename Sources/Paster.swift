@@ -3,7 +3,7 @@ import AppKit
 import Carbon.HIToolbox
 import ApplicationServices
 
-/// Remembers which app had focus when dictation started.
+/// Remembers which app had focus when dictation started (for Terminal restore only).
 enum FocusMemory {
     private static var app: NSRunningApplication?
 
@@ -19,11 +19,9 @@ enum PasteOutcome: Equatable {
     case copiedOnly
 }
 
-/// Clipboard + auto-paste into the app that was focused when recording started.
-///
-/// Do NOT gate on `hasActiveTextTarget()` — Electron/Cursor/Chrome often fail that
-/// check even with a real caret, which forced “copy only” and manual ⌘V forever.
-/// Do NOT call `activateIgnoringOtherApps` on normal apps — it steals caret focus.
+/// Clipboard + paste — restored from the known-good path (commit 374740b).
+/// Normal apps: never activateIgnoringOtherApps (that broke paste). Just ⌘V.
+/// Terminals: activate + Edit→Paste / System Events.
 enum Paster {
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -48,117 +46,74 @@ enum Paster {
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        let target = FocusMemory.current ?? NSWorkspace.shared.frontmostApplication
-        if target == nil || target?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            print("📋 No target app — copied only")
+        let target = FocusMemory.current
+        if target?.bundleIdentifier == Bundle.main.bundleIdentifier {
             return .copiedOnly
         }
 
-        let processName = target?.localizedName
-        let terminal = isTerminalApp(target)
-        let alreadyFront = target == NSWorkspace.shared.frontmostApplication
-
-        // Terminals often need a hard activate; normal apps keep caret if left alone.
-        if terminal {
-            target?.activate(options: [.activateIgnoringOtherApps])
-        } else if !alreadyFront {
-            // Soft bring-forward without killing the text field focus if possible
-            target?.activate(options: [])
+        if isTerminalApp(target) {
+            pasteIntoTerminal(app: target)
+            return .inserted
         }
 
-        // Fn release / hands-free stop needs a beat before synthetic ⌘V is accepted
-        let delay: TimeInterval = terminal ? 0.35 : 0.28
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            deliver(text: text, processName: processName, terminal: terminal)
+        // Normal apps (Notes, Slack, Cursor, browsers…):
+        // Do NOT call activateIgnoringOtherApps — that breaks paste.
+        // Do NOT gate on caret detection — Electron apps fail that check.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            simulateCommandV()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                pasteViaSystemEvents(processName: nil)
+            }
         }
         return .inserted
     }
 
-    private static func deliver(text: String, processName: String?, terminal: Bool) {
-        // 1) Accessibility caret insert
-        if insertViaAccessibility(text) {
-            print("✅ Paste via Accessibility insert")
-            return
-        }
-
-        // 2) Synthetic ⌘V (works when Accessibility grants HID posting)
-        simulateCommandV()
-        usleep(40_000)
-        simulateCommandV()
-
-        // 3) System Events → named process (Automation permission)
-        if let processName {
-            if pasteViaNSAppleScript(processName: processName) {
-                print("✅ Paste via NSAppleScript (\(processName))")
-                return
-            }
-            if pasteViaSystemEventsOsascript(processName: processName) {
-                print("✅ Paste via osascript (\(processName))")
-                return
-            }
-            if pasteViaMenu(processName: processName) {
-                print("✅ Paste via Edit menu")
-                return
-            }
-        }
-
-        // 4) Generic System Events ⌘V
-        _ = pasteViaNSAppleScript(processName: nil)
-        _ = pasteViaSystemEventsOsascript(processName: nil)
-        print("✅ Paste fallbacks fired (clipboard ready if HID blocked)")
+    private static func isTerminalApp(_ app: NSRunningApplication?) -> Bool {
+        guard let id = app?.bundleIdentifier else { return false }
+        if terminalBundleIDs.contains(id) { return true }
+        let name = (app?.localizedName ?? "").lowercased()
+        return name.contains("terminal") || name.contains("iterm")
+            || name.contains("kitty") || name.contains("warp")
+            || name.contains("alacritty") || name.contains("ghostty")
+            || name.contains("wezterm") || name.contains("hyper")
     }
 
-    // MARK: - Insert strategies
-
-    @discardableResult
-    private static func insertViaAccessibility(_ text: String) -> Bool {
-        let system = AXUIElementCreateSystemWide()
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
-        ) == .success, let focusedRef else { return false }
-
-        let el = focusedRef as! AXUIElement
-        if AXUIElementSetAttributeValue(
-            el, kAXSelectedTextAttribute as CFString, text as CFTypeRef
-        ) == .success {
-            return true
-        }
-
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
-              let existing = valueRef as? String else { return false }
-
-        var insertion = existing + text
-        var rangeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            el, kAXSelectedTextRangeAttribute as CFString, &rangeRef
-        ) == .success,
-           let range = rangeRef,
-           CFGetTypeID(range) == AXValueGetTypeID() {
-            var cfRange = CFRange()
-            if AXValueGetValue(range as! AXValue, .cfRange, &cfRange),
-               cfRange.location >= 0,
-               cfRange.location <= existing.utf16.count {
-                let start = existing.utf16.index(
-                    existing.utf16.startIndex,
-                    offsetBy: cfRange.location,
-                    limitedBy: existing.utf16.endIndex
-                ) ?? existing.utf16.endIndex
-                let endOffset = min(cfRange.location + max(cfRange.length, 0), existing.utf16.count)
-                let end = existing.utf16.index(
-                    existing.utf16.startIndex,
-                    offsetBy: endOffset,
-                    limitedBy: existing.utf16.endIndex
-                ) ?? existing.utf16.endIndex
-                let startS = String.Index(start, within: existing) ?? existing.endIndex
-                let endS = String.Index(end, within: existing) ?? existing.endIndex
-                insertion = existing.replacingCharacters(in: startS..<endS, with: text)
+    private static func pasteIntoTerminal(app: NSRunningApplication?) {
+        let processName = app?.localizedName ?? "Terminal"
+        app?.activate(options: [.activateIgnoringOtherApps])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            if pasteViaMenu(processName: processName) { return }
+            pasteViaSystemEvents(processName: processName)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                simulateCommandV()
             }
         }
-        return AXUIElementSetAttributeValue(
-            el, kAXValueAttribute as CFString, insertion as CFTypeRef
-        ) == .success
+    }
+
+    @discardableResult
+    private static func pasteViaMenu(processName: String) -> Bool {
+        let escaped = processName
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "System Events"
+          tell process "\(escaped)"
+            try
+              click menu item "Paste" of menu "Edit" of menu bar 1
+              return "ok"
+            end try
+            try
+              keystroke "v" using command down
+              return "ok"
+            end try
+          end tell
+        end tell
+        return "fail"
+        """
+        var err: NSDictionary?
+        let result = NSAppleScript(source: script)?.executeAndReturnError(&err)
+        if err != nil { return false }
+        return result?.stringValue == "ok"
     }
 
     private static func simulateCommandV() {
@@ -166,20 +121,21 @@ enum Paster {
         src?.localEventsSuppressionInterval = 0
         let v = CGKeyCode(kVK_ANSI_V)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false) else { return }
-        // Only ⌘ — clear any leftover Fn/globe from the hotkey
+              let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false) else {
+            return
+        }
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
-        usleep(15_000)
         up.post(tap: .cghidEventTap)
     }
 
-    @discardableResult
-    private static func pasteViaNSAppleScript(processName: String?) -> Bool {
+    private static func pasteViaSystemEvents(processName: String?) {
         let script: String
         if let processName {
-            let escaped = escapeAppleScript(processName)
+            let escaped = processName
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
             script = """
             tell application "System Events"
               tell process "\(escaped)"
@@ -197,99 +153,15 @@ enum Paster {
         }
         var err: NSDictionary?
         NSAppleScript(source: script)?.executeAndReturnError(&err)
-        if let err {
-            print("⚠️ NSAppleScript: \(err)")
-            return false
-        }
-        return true
-    }
-
-    @discardableResult
-    private static func pasteViaMenu(processName: String) -> Bool {
-        let escaped = escapeAppleScript(processName)
-        let script = """
-        tell application "System Events"
-          tell process "\(escaped)"
-            try
-              click menu item "Paste" of menu "Edit" of menu bar 1
-              return "ok"
-            end try
-          end tell
-        end tell
-        return "fail"
-        """
-        return runOsascript(script) == "ok"
-    }
-
-    @discardableResult
-    private static func pasteViaSystemEventsOsascript(processName: String?) -> Bool {
-        let script: String
-        if let processName {
-            let escaped = escapeAppleScript(processName)
-            script = """
-            tell application "System Events"
-              tell process "\(escaped)"
-                set frontmost to true
-                keystroke "v" using command down
-              end tell
-            end tell
-            """
-        } else {
-            script = """
-            tell application "System Events"
-              keystroke "v" using command down
-            end tell
-            """
-        }
-        return runOsascript(script) != nil
-    }
-
-    private static func runOsascript(_ source: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", source]
-        let out = Pipe()
-        let err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        do {
-            try p.run()
-            p.waitUntilExit()
-        } catch {
-            return nil
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if p.terminationStatus != 0 {
-            let errData = err.fileHandleForReading.readDataToEndOfFile()
-            if let e = String(data: errData, encoding: .utf8), !e.isEmpty {
-                print("⚠️ osascript: \(e)")
-            }
-            return nil
-        }
-        return text ?? ""
-    }
-
-    private static func escapeAppleScript(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-    }
-
-    private static func isTerminalApp(_ app: NSRunningApplication?) -> Bool {
-        guard let id = app?.bundleIdentifier else { return false }
-        if terminalBundleIDs.contains(id) { return true }
-        let name = (app?.localizedName ?? "").lowercased()
-        return name.contains("terminal") || name.contains("iterm")
-            || name.contains("kitty") || name.contains("warp")
-            || name.contains("alacritty") || name.contains("ghostty")
-            || name.contains("wezterm") || name.contains("hyper")
+        if let err { print("⚠️ System Events paste: \(err)") }
     }
 
     static func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
     static func openAutomationSettings() {
@@ -298,6 +170,7 @@ enum Paster {
         }
     }
 
+    /// New binary → Accessibility grant may not apply. Re-prompt once per binary.
     static func refreshTrustPromptIfBinaryChanged() {
         guard let exe = Bundle.main.executableURL,
               let attrs = try? FileManager.default.attributesOfItem(atPath: exe.path),
@@ -307,11 +180,9 @@ enum Paster {
             return
         }
         let token = "\(modified.timeIntervalSince1970)-\(size)"
-        let prev = UserDefaults.standard.string(forKey: exeTokenKey)
-        if prev != token {
+        if UserDefaults.standard.string(forKey: exeTokenKey) != token {
             UserDefaults.standard.set(token, forKey: exeTokenKey)
             UserDefaults.standard.set(false, forKey: didPromptKey)
-            print("🔁 New Whisper binary — will re-prompt Accessibility")
         }
         promptAccessibilityOnce()
     }
