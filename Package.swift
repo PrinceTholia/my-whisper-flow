@@ -6,15 +6,11 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
-    dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.7.0"),
-    ],
+    dependencies: [],
     targets: [
         .executableTarget(
             name: "WhisperApp",
-            dependencies: [
-                .product(name: "Sparkle", package: "Sparkle"),
-            ],
+            dependencies: [],
             path: "Sources"
         )
     ]

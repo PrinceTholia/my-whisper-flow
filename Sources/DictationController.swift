@@ -49,6 +49,7 @@ class DictationController: ObservableObject {
 
     func start() {
         guard !processing, !recorder.isRecording else { return }
+        FocusMemory.capture()
         recorder.startRecording()
         isRecording = recorder.isRecording
         if isRecording {
@@ -81,14 +82,16 @@ class DictationController: ObservableObject {
                 let final = CorrectionDictionary.shared.apply(to: text)
                 let snippet = String(final.prefix(28))
                 self.status = "✅ " + snippet
-                self.stage = .done(snippet)
+                // Hide overlay before paste so the target field keeps focus
+                self.stage = .idle
                 self.processing = false
                 Paster.paste(final)
                 DictionaryLearner.watchAfterPaste(final)
-                // กลับเป็น idle หลังโชว์สักครู่
+                // Brief confirmation via tooltip only (no blocking overlay)
+                self.status = "✅ Pasted: " + snippet
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                     guard let self = self else { return }
-                    if self.stage == .done(snippet) { self.stage = .idle }
+                    if self.status.hasPrefix("✅") { self.status = "" }
                 }
             }
         }
@@ -165,134 +168,4 @@ class DictationController: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return result
     }
-}
-
-/// Copy text to clipboard and insert into the focused app.
-/// Prefers Accessibility selected-text insert; falls back to ⌘V.
-enum Paster {
-    private static var didWarnThisSession = false
-
-    static func paste(_ text: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-
-        let trusted = AXIsProcessTrusted()
-
-        // Always attempt insert — don't open System Settings here (steals focus).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            let inserted = insertViaAccessibility(text)
-            if !inserted {
-                simulateCommandV()
-            }
-
-            // Only warn once per launch if Accessibility is still off
-            if !AXIsProcessTrusted(), !didWarnThisSession {
-                didWarnThisSession = true
-                NotificationCenter.default.post(
-                    name: .whisperPasteNeedsAccessibility,
-                    object: nil
-                )
-            }
-        }
-
-        if !trusted {
-            print("⚠️ Accessibility may be off — attempted paste; text also on clipboard")
-        }
-    }
-
-    /// Best path: replace selected text (or insert at caret) via AX — works when ⌘V is flaky.
-    @discardableResult
-    private static func insertViaAccessibility(_ text: String) -> Bool {
-        let system = AXUIElementCreateSystemWide()
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
-        ) == .success, let focusedRef else { return false }
-
-        let el = focusedRef as! AXUIElement
-
-        // 1) Replace selection / insert at caret (preferred)
-        if AXUIElementSetAttributeValue(
-            el, kAXSelectedTextAttribute as CFString, text as CFTypeRef
-        ) == .success {
-            return true
-        }
-
-        // 2) Some fields only expose AXValue — append/replace whole value carefully
-        var valueRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
-           let existing = valueRef as? String {
-            var rangeRef: CFTypeRef?
-            var insertion = existing + text
-            if AXUIElementCopyAttributeValue(
-                el, kAXSelectedTextRangeAttribute as CFString, &rangeRef
-            ) == .success,
-               let range = rangeRef,
-               CFGetTypeID(range) == AXValueGetTypeID() {
-                var cfRange = CFRange()
-                if AXValueGetValue(range as! AXValue, .cfRange, &cfRange),
-                   cfRange.location >= 0,
-                   cfRange.location <= existing.utf16.count {
-                    let start = existing.utf16.index(
-                        existing.utf16.startIndex,
-                        offsetBy: cfRange.location,
-                        limitedBy: existing.utf16.endIndex
-                    ) ?? existing.utf16.endIndex
-                    let endOffset = min(cfRange.location + max(cfRange.length, 0), existing.utf16.count)
-                    let end = existing.utf16.index(
-                        existing.utf16.startIndex,
-                        offsetBy: endOffset,
-                        limitedBy: existing.utf16.endIndex
-                    ) ?? existing.utf16.endIndex
-                    let startS = String.Index(start, within: existing) ?? existing.endIndex
-                    let endS = String.Index(end, within: existing) ?? existing.endIndex
-                    insertion = existing.replacingCharacters(in: startS..<endS, with: text)
-                }
-            }
-            if AXUIElementSetAttributeValue(
-                el, kAXValueAttribute as CFString, insertion as CFTypeRef
-            ) == .success {
-                return true
-            }
-        }
-
-        return false
-    }
-
-    private static func simulateCommandV() {
-        let src = CGEventSource(stateID: .combinedSessionState)
-        let v = CGKeyCode(kVK_ANSI_V)
-        guard let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false) else {
-            return
-        }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
-    }
-
-    /// Call from menu / first launch only — never from the paste path.
-    static func openAccessibilitySettings() {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    /// Quiet launch check — no Settings window (avoids stealing focus every session).
-    static func promptAccessibilityOnce() {
-        if AXIsProcessTrusted() { return }
-        // Register with TCC silently so Whisper appears in the Accessibility list
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        _ = AXIsProcessTrustedWithOptions([key: false] as CFDictionary)
-    }
-
-    static var isTrusted: Bool { AXIsProcessTrusted() }
-}
-
-extension Notification.Name {
-    static let whisperPasteNeedsAccessibility = Notification.Name("whisperPasteNeedsAccessibility")
 }

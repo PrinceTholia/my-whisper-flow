@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 import Combine
 import AVFoundation
-import Sparkle
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let controller = DictationController()
@@ -10,7 +9,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
     private var cancellables = Set<AnyCancellable>()
-    private var updaterController: SPUStandardUpdaterController!
 
     private var settingsWindow: NSWindow?
     private var aboutWindow: NSWindow?
@@ -29,7 +27,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         setupPanel()
         setupHotkey()
 
-        // Update icon / panel based on processing stage
         controller.$stage
             .receive(on: DispatchQueue.main)
             .sink { [weak self] stage in
@@ -53,7 +50,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             .sink { [weak self] s in self?.statusItem.button?.toolTip = s }
             .store(in: &cancellables)
 
-        // Request Accessibility permission once (required for auto ⌘V paste)
         Paster.promptAccessibilityOnce()
 
         NotificationCenter.default.publisher(for: .dictionaryAutoLearned)
@@ -63,21 +59,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
                 self?.controller.status = "📚 Learned: \(summary)"
             }
             .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .whisperPasteNeedsAccessibility)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.controller.status = "⚠️ Enable Whisper in Accessibility, then Quit & reopen"
-                self?.controller.stage = .error("Quit & reopen Whisper after enabling Accessibility")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
-                }
-            }
-            .store(in: &cancellables)
-
-        // Sparkle auto-updater (checks SUFeedURL on launch + daily)
-        updaterController = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     }
 
     // MARK: - Status bar
@@ -127,16 +108,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         menu.addItem(settings)
 
-        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
-        updates.target = self
-        updates.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
-        menu.addItem(updates)
-
-        let whatsNew = NSMenuItem(title: "What's New…", action: #selector(openChangelog), keyEquivalent: "")
-        whatsNew.target = self
-        whatsNew.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
-        menu.addItem(whatsNew)
-
         let dictionary = NSMenuItem(title: "Dictionary…", action: #selector(openDictionary), keyEquivalent: "d")
         dictionary.target = self
         dictionary.image = NSImage(systemSymbolName: "text.book.closed", accessibilityDescription: nil)
@@ -163,7 +134,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     func menuWillOpen(_ menu: NSMenu) { updateStates() }
 
     private func updateStates() {
-        // Keep Backtrack in sync if toggled from Settings
         let bt = UserDefaults.standard.bool(forKey: "backtrackEnabled")
         if controller.useBacktrack != bt { controller.useBacktrack = bt }
 
@@ -193,16 +163,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         updateStates()
     }
 
-    @objc private func checkForUpdates() {
-        updaterController?.updater.checkForUpdates()
-    }
-
-    @objc private func openChangelog() {
-        if let url = URL(string: "https://gamezxz.github.io/WhisperApp/changelog") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     @objc private func openSettings() {
         if settingsWindow == nil {
             let w = NSWindow(
@@ -215,8 +175,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             w.center()
             settingsWindow = w
         }
-        // Menu-bar app (.accessory) can't receive keyboard focus
-        // → Switch to .regular temporarily so the key fields accept input
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
@@ -258,9 +216,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
 
     @objc private func fixAccessibility() {
         Paster.openAccessibilitySettings()
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
     }
 
-    // Return to menu-bar mode when a window closes (hide from Dock)
     func windowWillClose(_ notification: Notification) {
         let win = notification.object as? NSWindow
         if win === settingsWindow || win === aboutWindow || win === dictionaryWindow {
@@ -300,7 +258,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     private func showPanel() {
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
-            // Bottom-center like the preview mock (~72pt above Dock)
             panel.setFrameOrigin(NSPoint(x: f.midX - panel.frame.width / 2,
                                          y: f.minY + 72))
         }
@@ -308,7 +265,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     }
 
     private func hidePanel() {
-        // Slight delay so waveform fades out smoothly
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             if !self.controller.isRecording { self.panel.orderOut(nil) }
         }
@@ -319,13 +275,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     private func setupHotkey() {
         let mgr = HotkeyManager.shared
 
-        // Toggle mode: press to start, press again to stop
-        mgr.onKeyDown = { [weak self] in
-            DispatchQueue.main.async { self?.controller.toggle() }
-        }
-
-        // Hold mode: keyDown → start, keyUp → stop (handled inside toggle via holdMode flag)
-        // For hold mode, we need separate start/stop callbacks
         mgr.onKeyDown = { [weak self] in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -348,5 +297,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         }
 
         mgr.start()
+    }
+}
+
+private func open(_ urlString: String) {
+    if let url = URL(string: urlString) {
+        NSWorkspace.shared.open(url)
     }
 }
