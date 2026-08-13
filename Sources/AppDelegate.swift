@@ -19,6 +19,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     private var toggleItem: NSMenuItem!
     private var cloudItem: NSMenuItem!
     private var correctionItem: NSMenuItem!
+    private var backtrackItem: NSMenuItem!
     private var langMenu: NSMenu!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -55,6 +56,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         // Request Accessibility permission once (required for auto ⌘V paste)
         Paster.promptAccessibilityOnce()
 
+        NotificationCenter.default.publisher(for: .dictionaryAutoLearned)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in
+                guard let summary = note.userInfo?["summary"] as? String else { return }
+                self?.controller.status = "📚 Learned: \(summary)"
+            }
+            .store(in: &cancellables)
+
         // Sparkle auto-updater (checks SUFeedURL on launch + daily)
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
@@ -77,8 +86,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         cloudItem.target = self
         correctionItem = NSMenuItem(title: "AI Correction", action: #selector(toggleCorrection), keyEquivalent: "")
         correctionItem.target = self
+        backtrackItem = NSMenuItem(title: "Backtrack", action: #selector(toggleBacktrack), keyEquivalent: "")
+        backtrackItem.target = self
         menu.addItem(cloudItem)
         menu.addItem(correctionItem)
+        menu.addItem(backtrackItem)
         menu.addItem(.separator())
 
         let langMenu = NSMenu()
@@ -135,10 +147,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     func menuWillOpen(_ menu: NSMenu) { updateStates() }
 
     private func updateStates() {
+        // Keep Backtrack in sync if toggled from Settings
+        let bt = UserDefaults.standard.bool(forKey: "backtrackEnabled")
+        if controller.useBacktrack != bt { controller.useBacktrack = bt }
+
         cloudItem.state = controller.useCloudSTT ? .on : .off
         cloudItem.title = "STT: Cloud (\(STTSettings.current.name))"
         correctionItem.state = controller.useCorrection ? .on : .off
         correctionItem.title = "AI Correction (\(LLMSettings.current.name))"
+        backtrackItem.state = controller.useBacktrack ? .on : .off
+        backtrackItem.title = "Backtrack (self-corrections)"
         let hk = HotkeyManager.shared.currentConfig.displayString
         toggleItem.title = controller.isRecording ? "Stop Speaking (\(hk))" : "Start Speaking (\(hk))"
         for item in langMenu.items {
@@ -150,6 +168,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     @objc private func toggleAction() { controller.toggle() }
     @objc private func toggleCloud() { controller.useCloudSTT.toggle(); updateStates() }
     @objc private func toggleCorrection() { controller.useCorrection.toggle(); updateStates() }
+    @objc private func toggleBacktrack() {
+        controller.useBacktrack.toggle()
+        updateStates()
+    }
     @objc private func setLanguage(_ sender: NSMenuItem) {
         if let code = sender.representedObject as? String { controller.language = code }
         updateStates()
@@ -241,7 +263,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
 
     private func setupPanel() {
         let hosting = NSHostingView(rootView: FloatingStatusView(controller: controller))
-        let rect = NSRect(x: 0, y: 0, width: 300, height: 98)
+        let rect = NSRect(x: 0, y: 0, width: 220, height: 64)
         panel = NSPanel(contentRect: rect,
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -249,7 +271,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.contentView = hosting
@@ -258,8 +280,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     private func showPanel() {
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
+            // Sit near bottom-center like a Flow-style pill (clear of Dock)
             panel.setFrameOrigin(NSPoint(x: f.midX - panel.frame.width / 2,
-                                         y: f.minY + 130))
+                                         y: f.minY + 72))
         }
         panel.orderFrontRegardless()
     }

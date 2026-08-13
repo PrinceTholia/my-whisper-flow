@@ -12,7 +12,8 @@ class TextCorrectionService: ObservableObject {
 
     var isAvailable: Bool { apiKey != nil }
 
-    func correct(text: String, language: String, completion: @escaping (String?) -> Void) {
+    func correct(text: String, language: String, backtrack: Bool = false,
+                 completion: @escaping (String?) -> Void) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             completion(nil); return
         }
@@ -41,6 +42,21 @@ class TextCorrectionService: ObservableObject {
         - Return ONLY the corrected text — no explanations, no quotation marks
         \(langHint)
         """
+
+        if backtrack {
+            systemPrompt += """
+
+
+            BACKTRACK (enabled): The speaker may correct themselves mid-utterance.
+            Keep only the FINAL intended meaning. Drop abandoned phrases, false starts,
+            and correction markers such as "sorry", "actually", "I mean", "scratch that",
+            "no wait", "wait", or a full restatement that replaces an earlier clause.
+            Example input: "I want to create something new, sorry, I want to make something that was not mentioned."
+            Example output: "I want to make something that was not mentioned."
+            Do NOT remove the word "actually" when it is part of meaning
+            (e.g. "I actually enjoyed it" stays intact).
+            """
+        }
 
         // User's own known corrections — helps with proper nouns / brand names the model
         // wouldn't otherwise know. (A deterministic pass also runs before paste, so exact

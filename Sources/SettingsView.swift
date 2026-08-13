@@ -9,6 +9,11 @@ struct SettingsView: View {
     @State private var groqKey = ""
     @State private var groqMsg = ""
 
+    // Features
+    @State private var backtrackOn = false
+    @State private var soundOn = true
+    @State private var autoDictOn = true
+
     private var sttProvider: STTProvider { STTRegistry.provider(id: "groq") }
     private var llmProvider: LLMProvider { LLMRegistry.provider(id: "groq") }
 
@@ -51,6 +56,37 @@ struct SettingsView: View {
 
                 Divider()
 
+                // ── Cleanup / feedback ──
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Dictation polish", systemImage: "wand.and.stars")
+                        .font(.subheadline).bold()
+
+                    Toggle("Backtrack (drop “sorry / actually…” self-corrections)", isOn: $backtrackOn)
+                        .font(.caption)
+                        .onChange(of: backtrackOn) { v in
+                            UserDefaults.standard.set(v, forKey: "backtrackEnabled")
+                        }
+
+                    Text("Off by default. When on: “I want X, sorry, I want Y” pastes as “I want Y”. Needs AI Correction.")
+                        .font(.caption2).foregroundColor(.secondary)
+
+                    Toggle("Soft sound when recording starts/stops", isOn: $soundOn)
+                        .font(.caption)
+                        .onChange(of: soundOn) { v in FeedbackSound.isEnabled = v }
+
+                    Text("Custom soft pips (not Wispr’s sounds). Toggle off if you prefer silence.")
+                        .font(.caption2).foregroundColor(.secondary)
+
+                    Toggle("Auto-add edits to Dictionary", isOn: $autoDictOn)
+                        .font(.caption)
+                        .onChange(of: autoDictOn) { v in DictionaryLearner.isEnabled = v }
+
+                    Text("After paste, if you fix a word in the text field, that correction is learned automatically (needs Accessibility).")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+
+                Divider()
+
                 // ── Groq (STT + AI correction) ──
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Groq API Key", systemImage: "key.fill")
@@ -72,15 +108,20 @@ struct SettingsView: View {
                         .font(.caption2).foregroundColor(.secondary)
                 }
 
-                Text("💡 Fix words the STT keeps mis-transcribing via Dictionary…")
+                Text("💡 Fix words the STT keeps mis-transcribing via menu → Dictionary…")
                     .font(.caption2).foregroundColor(.secondary)
 
                 Spacer(minLength: 0)
             }
             .padding(20)
         }
-        .frame(width: 460, height: 420)
-        .onAppear { loadKey() }
+        .frame(width: 460, height: 520)
+        .onAppear {
+            loadKey()
+            backtrackOn = UserDefaults.standard.bool(forKey: "backtrackEnabled")
+            soundOn = FeedbackSound.isEnabled
+            autoDictOn = DictionaryLearner.isEnabled
+        }
     }
 
     // MARK: Groq key (shared by STT + LLM)

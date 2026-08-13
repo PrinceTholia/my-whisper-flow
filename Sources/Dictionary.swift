@@ -68,6 +68,79 @@ final class CorrectionDictionary {
 
     // MARK: - Public
 
+    /// Append a rule and persist. Skips empty / identical / duplicate rules.
+    @discardableResult
+    func addRule(from: String, to: String) -> Bool {
+        let f = from.trimmingCharacters(in: .whitespacesAndNewlines)
+        let t = to.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !f.isEmpty, !t.isEmpty, f != t else { return false }
+
+        lock.lock()
+        defer { lock.unlock() }
+        reload(force: true)
+        if rules.contains(where: { $0.from.caseInsensitiveCompare(f) == .orderedSame && $0.to == t }) {
+            return false
+        }
+        let isASCII = f.unicodeScalars.allSatisfy { $0.isASCII }
+        rules.append(Rule(from: f, to: t, isASCII: isASCII))
+        persistLocked()
+        return true
+    }
+
+    /// Compare pasted text vs user-edited text; add one rule per changed token.
+    /// Returns the rules that were newly added.
+    @discardableResult
+    func learn(from original: String, to edited: String) -> [(from: String, to: String)] {
+        let a = tokenize(original)
+        let b = tokenize(edited)
+        guard !a.isEmpty, !b.isEmpty else { return [] }
+
+        var pairs: [(String, String)] = []
+        if a.count == b.count {
+            for i in 0..<a.count where a[i] != b[i] {
+                // Only learn word-like tokens (skip pure punctuation)
+                if looksLearnable(a[i]), looksLearnable(b[i]) {
+                    pairs.append((a[i], b[i]))
+                }
+            }
+        } else {
+            // Single substitution heuristic: one token removed, one added
+            let setA = Set(a)
+            let setB = Set(b)
+            let removed = a.filter { !setB.contains($0) }
+            let added = b.filter { !setA.contains($0) }
+            if removed.count == 1, added.count == 1,
+               looksLearnable(removed[0]), looksLearnable(added[0]) {
+                pairs.append((removed[0], added[0]))
+            }
+        }
+
+        var added: [(from: String, to: String)] = []
+        for (f, t) in pairs {
+            if addRule(from: f, to: t) {
+                added.append((f, t))
+            }
+        }
+        return added
+    }
+
+    private func tokenize(_ text: String) -> [String] {
+        text.split { $0.isWhitespace || $0.isNewline }.map(String.init)
+    }
+
+    private func looksLearnable(_ token: String) -> Bool {
+        let stripped = token.trimmingCharacters(in: .punctuationCharacters)
+        return stripped.count >= 2
+    }
+
+    private func persistLocked() {
+        let text = rules.map { "\($0.from) -> \($0.to)" }.joined(separator: "\n") + "\n"
+        try? FileManager.default.createDirectory(atPath: KeyStore.dir, withIntermediateDirectories: true)
+        try? text.write(toFile: Self.path, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: Self.path)
+        lastMtime = Date()
+    }
+
     /// Deterministic replacement applied to the final text before paste.
     func apply(to text: String) -> String {
         let active = snapshot()

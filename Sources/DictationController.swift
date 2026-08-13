@@ -21,7 +21,13 @@ class DictationController: ObservableObject {
     @Published var stage: Stage = .idle
     @Published var useCloudSTT = true
     @Published var useCorrection = true
+    /// Wispr-style Backtrack: drop false starts / “sorry, I meant…” restatements. Default OFF.
+    @Published var useBacktrack: Bool {
+        didSet { UserDefaults.standard.set(useBacktrack, forKey: Self.backtrackKey) }
+    }
     @Published var language = "th"
+
+    private static let backtrackKey = "backtrackEnabled"
 
     let recorder = AudioRecorder()
     private let whisper = WhisperService()
@@ -31,6 +37,7 @@ class DictationController: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     init() {
+        useBacktrack = UserDefaults.standard.bool(forKey: Self.backtrackKey) // default false
         recorder.$recordedFileURL
             .compactMap { $0 }
             .receive(on: DispatchQueue.main)
@@ -45,6 +52,7 @@ class DictationController: ObservableObject {
         recorder.startRecording()
         isRecording = recorder.isRecording
         if isRecording {
+            FeedbackSound.playStart()
             status = "Listening…"
             stage = .recording
         } else {
@@ -55,6 +63,7 @@ class DictationController: ObservableObject {
 
     func stop() {
         guard recorder.isRecording else { return }
+        FeedbackSound.playStop()
         recorder.stopRecording()
         isRecording = false
         status = "⏳ Processing…"
@@ -75,6 +84,7 @@ class DictationController: ObservableObject {
                 self.stage = .done(snippet)
                 self.processing = false
                 Paster.paste(final)
+                DictionaryLearner.watchAfterPaste(final)
                 // กลับเป็น idle หลังโชว์สักครู่
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                     guard let self = self else { return }
@@ -103,7 +113,11 @@ class DictationController: ObservableObject {
                     self.status = "✨ AI correction…"
                     self.stage = .correcting
                 }
-                self.correction.correct(text: text, language: lang) { corrected in
+                self.correction.correct(
+                    text: text,
+                    language: lang,
+                    backtrack: UserDefaults.standard.bool(forKey: Self.backtrackKey)
+                ) { corrected in
                     finishOnMain(corrected ?? text)
                 }
             } else {
