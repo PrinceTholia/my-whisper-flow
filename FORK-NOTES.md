@@ -63,3 +63,11 @@ cd /Users/princetholia/Desktop/Projects/Real/WhisperApp
 ./run.sh
 # open Whisper.app or copy to /Applications
 ```
+
+## Known conflict: macOS Dictation vs Fn
+
+If music pauses and “live” text appears then vanishes on Fn double-tap, macOS **Keyboard → Dictation → Shortcut** is still set to Press Fn twice. Whisper auto-disables `AppleFnUsageType` / `AppleDictationAutoEnable`, but users may need to set Shortcut → Off manually once.
+
+## Auto-paste after rebuilds
+
+Ad-hoc builds change code signature. Accessibility grants often stop applying → clipboard works but ⌘V is required. Fix: remove/re-add Whisper in Accessibility, enable Automation → System Events, Quit & reopen. Do not rely on `typeTextDirectly` as a success signal (events can be dropped).

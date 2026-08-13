@@ -51,10 +51,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             .store(in: &cancellables)
 
         // Stop macOS Dictation from stealing double-Fn (live text + music pause)
-        SystemConflictGuard.disableSystemFnDictationIfNeeded()
+        SystemConflictGuard.disableSystemFnDictationIfNeeded(showAlertIfChanged: true)
 
-        // Prompt Accessibility at most once ever — never spam when ad-hoc trust lies
-        Paster.promptAccessibilityOnce()
+        // New ad-hoc binary → re-prompt Accessibility; warm Automation for System Events paste
+        Paster.refreshTrustPromptIfBinaryChanged()
+        Paster.warmAutomationPermission()
 
         NotificationCenter.default.publisher(for: .dictionaryAutoLearned)
             .receive(on: DispatchQueue.main)
@@ -121,6 +122,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         ax.target = self
         ax.image = NSImage(systemSymbolName: "accessibility", accessibilityDescription: nil)
         menu.addItem(ax)
+
+        let autoPaste = NSMenuItem(title: "Test Auto-Paste", action: #selector(testAutoPaste), keyEquivalent: "")
+        autoPaste.target = self
+        autoPaste.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+        menu.addItem(autoPaste)
 
         let about = NSMenuItem(title: "About Whisper", action: #selector(openAbout), keyEquivalent: "")
         about.target = self
@@ -220,7 +226,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
 
     @objc private func fixAccessibility() {
         Paster.openAccessibilitySettings()
-        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            Paster.openAutomationSettings()
+        }
+        let alert = NSAlert()
+        alert.messageText = "Allow Whisper to auto-paste"
+        alert.informativeText = """
+        1. Accessibility → remove old Whisper rows → add /Applications/Whisper.app → ON
+        2. Automation → Whisper → enable System Events
+        3. Quit Whisper from the menu bar, then open it again
+
+        After each rebuild you may need step 1 again (ad-hoc signature changes).
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @objc private func testAutoPaste() {
+        FocusMemory.capture()
+        let outcome = Paster.paste("Whisper auto-paste OK")
+        controller.status = outcome == .inserted ? "Test paste sent — check the focused app" : "Test: copied only (click a text field first)"
+        controller.stage = outcome == .inserted ? .done("Test paste") : .copied
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.controller.stage = .idle
+        }
     }
 
     func windowWillClose(_ notification: Notification) {

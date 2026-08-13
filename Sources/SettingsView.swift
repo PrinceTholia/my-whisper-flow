@@ -62,6 +62,31 @@ struct SettingsView: View {
 
                 Divider()
 
+                // ── Troubleshooting ──
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("If paste / Fn acts weird", systemImage: "wrench.and.screwdriver")
+                        .font(.subheadline).bold()
+
+                    Text("1. Keyboard → Dictation → Shortcut → Off (macOS Dictation steals Fn twice, pauses music, shows fake live text).")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Text("2. Privacy → Accessibility → remove old Whisper → add /Applications/Whisper.app → ON → Quit & reopen Whisper.")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Text("3. Privacy → Automation → Whisper → System Events ON (needed for auto-paste).")
+                        .font(.caption2).foregroundColor(.secondary)
+
+                    HStack(spacing: 8) {
+                        Button("Fix Dictation conflict") {
+                            _ = SystemConflictGuard.disableSystemFnDictationIfNeeded(showAlertIfChanged: true)
+                            SystemConflictGuard.openDictationSettings()
+                        }
+                        Button("Open Accessibility") { Paster.openAccessibilitySettings() }
+                        Button("Open Automation") { Paster.openAutomationSettings() }
+                    }
+                    .font(.caption)
+                }
+
+                Divider()
+
                 // ── Cleanup / feedback ──
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Dictation polish", systemImage: "wand.and.stars")

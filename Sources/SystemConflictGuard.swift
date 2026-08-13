@@ -7,42 +7,96 @@ import AppKit
 /// shows live dictation text, pauses music, then clears the caret text when stopped —
 /// which looks like Whisper “live translate then vanish until ⌘V”.
 enum SystemConflictGuard {
-    private static let appliedKey = "whisper.didDisableSystemFnDictation"
+    private static let alertedKey = "whisper.didAlertSystemFnDictation"
 
-    /// Turn off system Fn→Dictation so Whisper owns the key. Safe to call every launch.
-    static func disableSystemFnDictationIfNeeded() {
+    /// Returns true if macOS still has Fn→Dictation enabled (conflicts with Whisper).
+    static var isSystemFnDictationEnabled: Bool {
         let suite = UserDefaults(suiteName: "com.apple.HIToolbox")
-        let fnUsage = suite?.object(forKey: "AppleFnUsageType") as? Int
-            ?? UserDefaults.standard.object(forKey: "AppleFnUsageType") as? Int
-        let dictationAuto = suite?.object(forKey: "AppleDictationAutoEnable") as? Int
-            ?? UserDefaults.standard.object(forKey: "AppleDictationAutoEnable") as? Int
+        let fnUsage = intValue(suite?.object(forKey: "AppleFnUsageType"))
+            ?? intValue(UserDefaults.standard.object(forKey: "AppleFnUsageType"))
+            ?? readDefaultsInt("AppleFnUsageType")
+        let dictationAuto = intValue(suite?.object(forKey: "AppleDictationAutoEnable"))
+            ?? intValue(UserDefaults.standard.object(forKey: "AppleDictationAutoEnable"))
+            ?? readDefaultsInt("AppleDictationAutoEnable")
+        // 3 = Fn starts dictation; 1 = dictation auto-enable / Fn-twice shortcut active
+        return fnUsage == 3 || dictationAuto == 1
+    }
 
-        // 3 = start dictation; we need Fn free for Whisper
-        let conflicts = (fnUsage == 3) || (dictationAuto == 1)
-        guard conflicts || !UserDefaults.standard.bool(forKey: appliedKey) else { return }
+    /// Turn off system Fn→Dictation so Whisper owns the key. Safe every launch.
+    @discardableResult
+    static func disableSystemFnDictationIfNeeded(showAlertIfChanged: Bool = true) -> Bool {
+        let wasEnabled = isSystemFnDictationEnabled
+        applyDisable()
 
-        // Fn does nothing at the system level (Whisper still sees flagsChanged)
+        if wasEnabled && showAlertIfChanged && !UserDefaults.standard.bool(forKey: alertedKey) {
+            UserDefaults.standard.set(true, forKey: alertedKey)
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "macOS Dictation was blocking Whisper"
+                alert.informativeText = """
+                Your Mac had “Press Fn twice” set for built-in Dictation. That pauses music, shows live system text, and fights Whisper paste.
+
+                Whisper turned that shortcut off. If it comes back: System Settings → Keyboard → Dictation → Shortcut → Off.
+                """
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Open Dictation Settings")
+                let response = alert.runModal()
+                if response == .alertSecondButtonReturn {
+                    openDictationSettings()
+                }
+            }
+        }
+        return wasEnabled
+    }
+
+    static func openDictationSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Dictation") {
+            NSWorkspace.shared.open(url)
+        } else if let url = URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Dictation") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private static func applyDisable() {
+        let suite = UserDefaults(suiteName: "com.apple.HIToolbox")
         suite?.set(0, forKey: "AppleFnUsageType")
-        UserDefaults.standard.set(0, forKey: "AppleFnUsageType")
-
-        // Don't auto-enable / prompt for system Dictation on Fn
         suite?.set(0, forKey: "AppleDictationAutoEnable")
+        UserDefaults.standard.set(0, forKey: "AppleFnUsageType")
         UserDefaults.standard.set(0, forKey: "AppleDictationAutoEnable")
 
-        // Also write via `defaults` domain for persistence across apps
+        runDefaultsWrite("AppleFnUsageType", "0")
+        runDefaultsWrite("AppleDictationAutoEnable", "0")
+        print("🛡️ Ensured system Fn→Dictation is off")
+    }
+
+    private static func runDefaultsWrite(_ key: String, _ value: String) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        task.arguments = ["write", "com.apple.HIToolbox", "AppleFnUsageType", "-int", "0"]
+        task.arguments = ["write", "com.apple.HIToolbox", key, "-int", value]
         try? task.run()
         task.waitUntilExit()
+    }
 
-        let task2 = Process()
-        task2.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        task2.arguments = ["write", "com.apple.HIToolbox", "AppleDictationAutoEnable", "-int", "0"]
-        try? task2.run()
-        task2.waitUntilExit()
+    private static func readDefaultsInt(_ key: String) -> Int? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["read", "com.apple.HIToolbox", key]
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        try? task.run()
+        task.waitUntilExit()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        guard let s = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              let v = Int(s) else { return nil }
+        return v
+    }
 
-        UserDefaults.standard.set(true, forKey: appliedKey)
-        print("🛡️ Disabled system Fn→Dictation conflict (AppleFnUsageType=0)")
+    private static func intValue(_ obj: Any?) -> Int? {
+        if let i = obj as? Int { return i }
+        if let n = obj as? NSNumber { return n.intValue }
+        return nil
     }
 }
