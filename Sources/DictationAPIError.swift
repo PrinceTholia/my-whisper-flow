@@ -1,7 +1,7 @@
 import Foundation
 
 /// User-visible failure from Groq / STT / LLM calls.
-enum DictationAPIError: Equatable {
+enum DictationAPIError: Error, Equatable {
     case noAPIKey(provider: String)
     case network(String)
     case http(status: Int, message: String, retryAfter: TimeInterval?)
