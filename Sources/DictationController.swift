@@ -25,9 +25,12 @@ class DictationController: ObservableObject {
     @Published var useBacktrack: Bool {
         didSet { UserDefaults.standard.set(useBacktrack, forKey: Self.backtrackKey) }
     }
-    @Published var language = "th"
+    @Published var language: String {
+        didSet { UserDefaults.standard.set(language, forKey: Self.languageKey) }
+    }
 
     private static let backtrackKey = "backtrackEnabled"
+    private static let languageKey = "dictationLanguage"
 
     let recorder = AudioRecorder()
     private let whisper = WhisperService()
@@ -38,6 +41,7 @@ class DictationController: ObservableObject {
 
     init() {
         useBacktrack = UserDefaults.standard.bool(forKey: Self.backtrackKey) // default false
+        language = UserDefaults.standard.string(forKey: Self.languageKey) ?? "en"
         recorder.$recordedFileURL
             .compactMap { $0 }
             .receive(on: DispatchQueue.main)

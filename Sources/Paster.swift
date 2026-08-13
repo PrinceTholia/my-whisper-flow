@@ -11,32 +11,108 @@ enum FocusMemory {
         app = NSWorkspace.shared.frontmostApplication
     }
 
-    static func restore(then work: @escaping () -> Void) {
+    static var current: NSRunningApplication? { app }
+
+    static func restore(delay: TimeInterval = 0.20, then work: @escaping () -> Void) {
         if let app, !app.isTerminated, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             app.activate(options: [.activateIgnoringOtherApps])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         }
     }
 }
 
-/// Clipboard + multi-strategy paste. Never blocks on AXIsProcessTrusted() checks —
-/// those return false for many ad-hoc builds even when the user enabled Accessibility.
+/// Clipboard + multi-strategy paste.
 enum Paster {
+    private static let terminalBundleIDs: Set<String> = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "net.kovidgoyal.kitty",
+        "dev.warp.Warp-Stable",
+        "dev.warp.Warp",
+        "com.github.wez.wezterm",
+        "org.alacritty",
+        "co.zeit.hyper",
+        "com.hrbrmstr.rio",
+        "com.mitchellh.ghostty",
+    ]
+
     static func paste(_ text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
+        // Terminal prefers plain string; also set the older NeXT type some apps expect
         pb.setString(text, forType: .string)
+        pb.setString(text, forType: NSPasteboard.PasteboardType("public.utf8-plain-text"))
 
-        FocusMemory.restore {
-            // Strategy order: AX insert → ⌘V CGEvent → System Events AppleScript
+        let target = FocusMemory.current
+        let isTerminal = isTerminalApp(target)
+
+        // Terminals need a longer activate delay; AX insert usually fails there
+        let delay: TimeInterval = isTerminal ? 0.35 : 0.20
+        FocusMemory.restore(delay: delay) {
+            if isTerminal {
+                pasteIntoTerminal(app: target)
+                return
+            }
             if insertViaAccessibility(text) { return }
             simulateCommandV()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                pasteViaSystemEvents()
+                pasteViaSystemEvents(processName: nil)
             }
         }
+    }
+
+    private static func isTerminalApp(_ app: NSRunningApplication?) -> Bool {
+        guard let id = app?.bundleIdentifier else { return false }
+        if terminalBundleIDs.contains(id) { return true }
+        // Heuristic for lesser-known terminals
+        let name = (app?.localizedName ?? "").lowercased()
+        return name.contains("terminal") || name.contains("iterm")
+            || name.contains("kitty") || name.contains("warp")
+            || name.contains("alacritty") || name.contains("ghostty")
+            || name.contains("wezterm") || name.contains("hyper")
+    }
+
+    /// Terminals ignore AX text insert; target the process and use Paste menu / ⌘V.
+    private static func pasteIntoTerminal(app: NSRunningApplication?) {
+        let processName = app?.localizedName ?? "Terminal"
+        // 1) Menu Paste (most reliable in Terminal.app / iTerm)
+        if pasteViaMenu(processName: processName) { return }
+        // 2) Process-scoped ⌘V
+        pasteViaSystemEvents(processName: processName)
+        // 3) Raw CGEvent as last resort (after a beat)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            simulateCommandV()
+        }
+    }
+
+    @discardableResult
+    private static func pasteViaMenu(processName: String) -> Bool {
+        let escaped = processName.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "System Events"
+          tell process "\(escaped)"
+            try
+              click menu item "Paste" of menu "Edit" of menu bar 1
+              return "ok"
+            end try
+            try
+              keystroke "v" using command down
+              return "ok"
+            end try
+          end tell
+        end tell
+        return "fail"
+        """
+        var err: NSDictionary?
+        let result = NSAppleScript(source: script)?.executeAndReturnError(&err)
+        if let err {
+            print("⚠️ Terminal menu paste: \(err)")
+            return false
+        }
+        return (result?.stringValue == "ok")
     }
 
     @discardableResult
@@ -108,13 +184,26 @@ enum Paster {
         up.post(tap: .cghidEventTap)
     }
 
-    /// Often works when AXIsProcessTrusted() lies — needs Automation → System Events.
-    private static func pasteViaSystemEvents() {
-        let script = """
-        tell application "System Events"
-          keystroke "v" using command down
-        end tell
-        """
+    private static func pasteViaSystemEvents(processName: String?) {
+        let script: String
+        if let processName {
+            let escaped = processName.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            script = """
+            tell application "System Events"
+              tell process "\(escaped)"
+                set frontmost to true
+                keystroke "v" using command down
+              end tell
+            end tell
+            """
+        } else {
+            script = """
+            tell application "System Events"
+              keystroke "v" using command down
+            end tell
+            """
+        }
         var err: NSDictionary?
         NSAppleScript(source: script)?.executeAndReturnError(&err)
         if let err {
@@ -130,7 +219,6 @@ enum Paster {
         }
     }
 
-    /// Register with TCC so Whisper appears in the Accessibility list (no dialog).
     static func promptAccessibilityOnce() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: false] as CFDictionary)
