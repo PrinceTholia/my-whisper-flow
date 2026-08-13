@@ -15,13 +15,17 @@ enum FocusMemory {
 }
 
 enum PasteOutcome: Equatable {
-    /// Text was inserted at the active caret.
+    /// Auto-insert / ⌘V was attempted at the focused target.
     case inserted
-    /// No active text cursor — left on clipboard for manual ⌘V.
+    /// No text caret detected — left on clipboard for manual ⌘V.
     case copiedOnly
 }
 
-/// Smart auto-paste: insert only when a text caret is active; otherwise copy + notify.
+/// Smart auto-paste: insert when a caret is likely; otherwise copy + notify.
+///
+/// Important: ad-hoc signed builds often make `AXIsProcessTrusted()` return false
+/// even when Accessibility is enabled in System Settings. We must NOT treat that
+/// as "no permission / no caret" or paste never runs.
 enum Paster {
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -35,7 +39,9 @@ enum Paster {
         "com.mitchellh.ghostty",
     ]
 
-    /// Deliver text. Returns whether it was auto-inserted or clipboard-only.
+    private static let didPromptKey = "whisper.didPromptAccessibility"
+
+    /// Deliver text. Returns whether auto-paste was attempted or clipboard-only.
     @discardableResult
     static func paste(_ text: String) -> PasteOutcome {
         guard !text.isEmpty else { return .copiedOnly }
@@ -44,26 +50,26 @@ enum Paster {
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        // Without Accessibility we cannot find the caret or insert — copy only
-        guard AXIsProcessTrusted() else {
-            print("📋 Accessibility off — copied only")
-            return .copiedOnly
-        }
-
-        // No active text caret → copy only (do not dump text into random UI)
-        guard hasActiveTextTarget() else {
+        let axTrusted = AXIsProcessTrusted()
+        // Only skip auto-paste when Accessibility APIs work AND confirm no caret.
+        if axTrusted && !hasActiveTextTarget() {
             print("📋 No active cursor — copied only")
             return .copiedOnly
         }
 
-        let target = FocusMemory.current
+        let target = FocusMemory.current ?? NSWorkspace.shared.frontmostApplication
+        // Don't paste into ourselves
+        if target?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            print("📋 Focus is Whisper — copied only")
+            return .copiedOnly
+        }
+
         let terminal = isTerminalApp(target)
         if terminal {
             target?.activate(options: [.activateIgnoringOtherApps])
         }
 
-        let delay: TimeInterval = terminal ? 0.28 : 0.08
-        // Fire async insert; outcome for UI is "inserted" because a caret was present
+        let delay: TimeInterval = terminal ? 0.28 : 0.05
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             if insertViaAccessibility(text) {
                 print("✅ Inserted via Accessibility")
@@ -77,7 +83,6 @@ enum Paster {
                 print("✅ Inserted via Terminal menu")
                 return
             }
-            // Last automatic attempt
             simulateCommandV()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
                 pasteViaSystemEvents(processName: terminal ? target?.localizedName : nil)
@@ -87,6 +92,7 @@ enum Paster {
     }
 
     /// True when focus is in something that can accept typed/pasted text.
+    /// Returns false when AX isn't trusted (caller must not treat that as "no caret").
     static func hasActiveTextTarget() -> Bool {
         guard AXIsProcessTrusted() else { return false }
 
@@ -102,7 +108,6 @@ enum Paster {
         AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
         let role = (roleRef as? String) ?? ""
 
-        // Never treat chrome controls as a caret target
         let nonText: Set<String> = [
             "AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
             "AXMenuItem", "AXMenu", "AXMenuBar", "AXMenuBarItem",
@@ -118,7 +123,6 @@ enum Paster {
         if textRoles.contains(role) { return true }
         if role.localizedCaseInsensitiveContains("text") { return true }
 
-        // Caret / selection range present → editable
         var rangeRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(
             el, kAXSelectedTextRangeAttribute as CFString, &rangeRef
@@ -126,7 +130,6 @@ enum Paster {
             return true
         }
 
-        // Electron / web: settable selected text or value
         var settable = DarwinBoolean(false)
         if AXUIElementIsAttributeSettable(el, kAXSelectedTextAttribute as CFString, &settable) == .success,
            settable.boolValue {
@@ -139,7 +142,6 @@ enum Paster {
             return true
         }
 
-        // Terminal: frontmost + any focus counts as ready for paste
         if isTerminalApp(FocusMemory.current) {
             return true
         }
@@ -151,7 +153,7 @@ enum Paster {
 
     @discardableResult
     private static func insertViaAccessibility(_ text: String) -> Bool {
-        guard AXIsProcessTrusted() else { return false }
+        // Try even if AXIsProcessTrusted() is false — TCC may still allow it for ad-hoc builds.
         let system = AXUIElementCreateSystemWide()
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -203,7 +205,6 @@ enum Paster {
 
     @discardableResult
     private static func typeTextDirectly(_ text: String) -> Bool {
-        guard AXIsProcessTrusted() else { return false }
         let src = CGEventSource(stateID: .hidSystemState)
         src?.localEventsSuppressionInterval = 0
 
@@ -305,16 +306,22 @@ enum Paster {
     }
 
     static func openAccessibilitySettings() {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+        // Soft prompt once so Whisper appears in the list — never every launch spam
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
+    /// Prompt at most once ever. Ad-hoc builds often keep AXIsProcessTrusted() false
+    /// even after the user enables Accessibility — do not re-prompt forever.
     static func promptAccessibilityOnce() {
+        if UserDefaults.standard.bool(forKey: didPromptKey) { return }
+        UserDefaults.standard.set(true, forKey: didPromptKey)
+        guard !AXIsProcessTrusted() else { return }
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        _ = AXIsProcessTrustedWithOptions([key: !AXIsProcessTrusted()] as CFDictionary)
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 }
 

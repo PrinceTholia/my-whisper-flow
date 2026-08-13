@@ -50,6 +50,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             .sink { [weak self] s in self?.statusItem.button?.toolTip = s }
             .store(in: &cancellables)
 
+        // Stop macOS Dictation from stealing double-Fn (live text + music pause)
+        SystemConflictGuard.disableSystemFnDictationIfNeeded()
+
+        // Prompt Accessibility at most once ever — never spam when ad-hoc trust lies
         Paster.promptAccessibilityOnce()
 
         NotificationCenter.default.publisher(for: .dictionaryAutoLearned)
@@ -57,18 +61,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             .sink { [weak self] note in
                 guard let summary = note.userInfo?["summary"] as? String else { return }
                 self?.controller.status = "📚 Learned: \(summary)"
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .whisperNeedsAccessibilityForPaste)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.controller.status = "Enable Accessibility for Whisper so text auto-pastes"
-                self?.controller.stage = .error("Enable Accessibility to auto-paste")
-                Paster.openAccessibilitySettings()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
-                }
             }
             .store(in: &cancellables)
     }

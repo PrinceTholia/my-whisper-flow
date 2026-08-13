@@ -1,5 +1,4 @@
 import SwiftUI
-import ApplicationServices
 
 /// Floating overlay matching the approved pill preview (compact Flow-like capsule).
 /// Fixed outer frame so NSHostingView inside NSPanel never renegotiates constraints.
@@ -32,9 +31,7 @@ struct FloatingStatusView: View {
         case .copied:
             StatusPill(icon: "doc.on.clipboard",
                        iconColor: Color(red: 0.55, green: 0.75, blue: 1.0),
-                       text: AXIsProcessTrusted()
-                         ? "Copied — ⌘V to paste"
-                         : "Copied — turn on Accessibility", spin: false)
+                       text: "Copied — ⌘V to paste", spin: false)
         case .error(let msg):
             StatusPill(icon: "exclamationmark.triangle.fill",
                        iconColor: Color(red: 1.0, green: 0.72, blue: 0.35),

@@ -45,6 +45,9 @@ struct SettingsView: View {
                     Text("Hold Fn to talk · Double-tap Fn for hands-free (tap Fn again to stop)")
                         .font(.caption2).foregroundColor(.secondary)
 
+                    Text("Whisper turns off macOS “Press Fn twice for Dictation” so it doesn’t steal live text or pause music. If it comes back: System Settings → Keyboard → Dictation → Shortcut → Off.")
+                        .font(.caption2).foregroundColor(.secondary)
+
                     Toggle("Hold to talk (press & hold to record, release to stop)", isOn: $hotkeyConfig.isHoldMode)
                         .font(.caption)
                         .onChange(of: hotkeyConfig.isHoldMode) { _ in

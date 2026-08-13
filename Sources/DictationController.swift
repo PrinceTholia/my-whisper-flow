@@ -95,13 +95,8 @@ class DictationController: ObservableObject {
                     self.status = "✅ Pasted"
                     self.stage = .done(snippet.isEmpty ? "Pasted" : snippet)
                 case .copiedOnly:
-                    if !AXIsProcessTrusted() {
-                        self.status = "Copied — enable Accessibility for auto-paste"
-                        self.stage = .copied
-                    } else {
-                        self.status = "Copied — press ⌘V to paste"
-                        self.stage = .copied
-                    }
+                    self.status = "Copied — press ⌘V to paste"
+                    self.stage = .copied
                 }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + (outcome == .copiedOnly ? 2.8 : 1.0)) { [weak self] in
