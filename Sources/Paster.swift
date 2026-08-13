@@ -317,3 +317,7 @@ enum Paster {
         _ = AXIsProcessTrustedWithOptions([key: !AXIsProcessTrusted()] as CFDictionary)
     }
 }
+
+extension Notification.Name {
+    static let whisperNeedsAccessibilityForPaste = Notification.Name("whisperNeedsAccessibilityForPaste")
+}
