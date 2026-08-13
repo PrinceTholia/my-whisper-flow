@@ -84,15 +84,15 @@ class DictationController: ObservableObject {
                 guard let self = self else { return }
                 let final = CorrectionDictionary.shared.apply(to: text)
                 let snippet = String(final.prefix(28))
-                self.status = "✅ " + snippet
-                self.stage = .idle
                 self.processing = false
+                // Keep a brief "done" flash, then paste while the target app still has focus
+                self.status = "✅ " + snippet
+                self.stage = .done(snippet)
                 Paster.paste(final)
                 DictionaryLearner.watchAfterPaste(final)
-                self.status = "✅ Pasted: " + snippet
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                     guard let self = self else { return }
-                    if self.status.hasPrefix("✅") { self.status = "" }
+                    if case .done = self.stage { self.stage = .idle }
                 }
             }
         }

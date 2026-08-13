@@ -3,7 +3,7 @@ import AppKit
 import Carbon.HIToolbox
 import ApplicationServices
 
-/// Remembers which app had focus when dictation started, so paste returns there.
+/// Remembers which app had focus when dictation started (for Terminal restore only).
 enum FocusMemory {
     private static var app: NSRunningApplication?
 
@@ -12,18 +12,10 @@ enum FocusMemory {
     }
 
     static var current: NSRunningApplication? { app }
-
-    static func restore(delay: TimeInterval = 0.20, then work: @escaping () -> Void) {
-        if let app, !app.isTerminated, app.bundleIdentifier != Bundle.main.bundleIdentifier {
-            app.activate(options: [.activateIgnoringOtherApps])
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
-        }
-    }
 }
 
-/// Clipboard + multi-strategy paste.
+/// Clipboard + paste. Keep the simple path for normal apps (what worked before);
+/// only Terminals get the special activate + Edit→Paste flow.
 enum Paster {
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -34,30 +26,28 @@ enum Paster {
         "com.github.wez.wezterm",
         "org.alacritty",
         "co.zeit.hyper",
-        "com.hrbrmstr.rio",
         "com.mitchellh.ghostty",
     ]
 
     static func paste(_ text: String) {
+        guard !text.isEmpty else { return }
+
         let pb = NSPasteboard.general
         pb.clearContents()
-        // Terminal prefers plain string; also set the older NeXT type some apps expect
         pb.setString(text, forType: .string)
-        pb.setString(text, forType: NSPasteboard.PasteboardType("public.utf8-plain-text"))
 
         let target = FocusMemory.current
-        let isTerminal = isTerminalApp(target)
+        if isTerminalApp(target) {
+            pasteIntoTerminal(app: target)
+            return
+        }
 
-        // Terminals need a longer activate delay; AX insert usually fails there
-        let delay: TimeInterval = isTerminal ? 0.35 : 0.20
-        FocusMemory.restore(delay: delay) {
-            if isTerminal {
-                pasteIntoTerminal(app: target)
-                return
-            }
-            if insertViaAccessibility(text) { return }
+        // Normal apps (Notes, Slack, Cursor, browsers…):
+        // Do NOT call activateIgnoringOtherApps — that was breaking paste everywhere.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             simulateCommandV()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            // Backup if ⌘V was ignored
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 pasteViaSystemEvents(processName: nil)
             }
         }
@@ -66,7 +56,6 @@ enum Paster {
     private static func isTerminalApp(_ app: NSRunningApplication?) -> Bool {
         guard let id = app?.bundleIdentifier else { return false }
         if terminalBundleIDs.contains(id) { return true }
-        // Heuristic for lesser-known terminals
         let name = (app?.localizedName ?? "").lowercased()
         return name.contains("terminal") || name.contains("iterm")
             || name.contains("kitty") || name.contains("warp")
@@ -74,22 +63,23 @@ enum Paster {
             || name.contains("wezterm") || name.contains("hyper")
     }
 
-    /// Terminals ignore AX text insert; target the process and use Paste menu / ⌘V.
     private static func pasteIntoTerminal(app: NSRunningApplication?) {
         let processName = app?.localizedName ?? "Terminal"
-        // 1) Menu Paste (most reliable in Terminal.app / iTerm)
-        if pasteViaMenu(processName: processName) { return }
-        // 2) Process-scoped ⌘V
-        pasteViaSystemEvents(processName: processName)
-        // 3) Raw CGEvent as last resort (after a beat)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            simulateCommandV()
+        // Bring terminal back (Fn release can leave focus elsewhere), then Paste
+        app?.activate(options: [.activateIgnoringOtherApps])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            if pasteViaMenu(processName: processName) { return }
+            pasteViaSystemEvents(processName: processName)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                simulateCommandV()
+            }
         }
     }
 
     @discardableResult
     private static func pasteViaMenu(processName: String) -> Bool {
-        let escaped = processName.replacingOccurrences(of: "\\", with: "\\\\")
+        let escaped = processName
+            .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
         tell application "System Events"
@@ -108,66 +98,8 @@ enum Paster {
         """
         var err: NSDictionary?
         let result = NSAppleScript(source: script)?.executeAndReturnError(&err)
-        if let err {
-            print("⚠️ Terminal menu paste: \(err)")
-            return false
-        }
-        return (result?.stringValue == "ok")
-    }
-
-    @discardableResult
-    private static func insertViaAccessibility(_ text: String) -> Bool {
-        let system = AXUIElementCreateSystemWide()
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
-        ) == .success, let focusedRef else { return false }
-
-        let el = focusedRef as! AXUIElement
-
-        if AXUIElementSetAttributeValue(
-            el, kAXSelectedTextAttribute as CFString, text as CFTypeRef
-        ) == .success {
-            return true
-        }
-
-        var valueRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
-           let existing = valueRef as? String {
-            var rangeRef: CFTypeRef?
-            var insertion = existing + text
-            if AXUIElementCopyAttributeValue(
-                el, kAXSelectedTextRangeAttribute as CFString, &rangeRef
-            ) == .success,
-               let range = rangeRef,
-               CFGetTypeID(range) == AXValueGetTypeID() {
-                var cfRange = CFRange()
-                if AXValueGetValue(range as! AXValue, .cfRange, &cfRange),
-                   cfRange.location >= 0,
-                   cfRange.location <= existing.utf16.count {
-                    let start = existing.utf16.index(
-                        existing.utf16.startIndex,
-                        offsetBy: cfRange.location,
-                        limitedBy: existing.utf16.endIndex
-                    ) ?? existing.utf16.endIndex
-                    let endOffset = min(cfRange.location + max(cfRange.length, 0), existing.utf16.count)
-                    let end = existing.utf16.index(
-                        existing.utf16.startIndex,
-                        offsetBy: endOffset,
-                        limitedBy: existing.utf16.endIndex
-                    ) ?? existing.utf16.endIndex
-                    let startS = String.Index(start, within: existing) ?? existing.endIndex
-                    let endS = String.Index(end, within: existing) ?? existing.endIndex
-                    insertion = existing.replacingCharacters(in: startS..<endS, with: text)
-                }
-            }
-            if AXUIElementSetAttributeValue(
-                el, kAXValueAttribute as CFString, insertion as CFTypeRef
-            ) == .success {
-                return true
-            }
-        }
-        return false
+        if err != nil { return false }
+        return result?.stringValue == "ok"
     }
 
     private static func simulateCommandV() {
@@ -187,7 +119,8 @@ enum Paster {
     private static func pasteViaSystemEvents(processName: String?) {
         let script: String
         if let processName {
-            let escaped = processName.replacingOccurrences(of: "\\", with: "\\\\")
+            let escaped = processName
+                .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
             script = """
             tell application "System Events"
@@ -206,9 +139,7 @@ enum Paster {
         }
         var err: NSDictionary?
         NSAppleScript(source: script)?.executeAndReturnError(&err)
-        if let err {
-            print("⚠️ System Events paste: \(err)")
-        }
+        if let err { print("⚠️ System Events paste: \(err)") }
     }
 
     static func openAccessibilitySettings() {
