@@ -167,7 +167,9 @@ class DictationController: ObservableObject {
     }
 }
 
-/// Copy text to clipboard and simulate ⌘V into the focused app (requires Accessibility permission)
+/// Copy text to clipboard and insert into the focused app.
+/// Prefers Accessibility selected-text insert; falls back to ⌘V.
+/// Requires Accessibility — after ad-hoc rebuilds macOS often drops trust until re-enabled.
 enum Paster {
     private static var didPrompt = false
 
@@ -176,28 +178,118 @@ enum Paster {
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        // ไม่มีสิทธิ์ Accessibility → เก็บใน clipboard เงียบๆ ผู้ใช้กด ⌘V เอง
-        // (ห้ามเด้ง dialog ตรงนี้ จะวนระหว่าง transcribe ไม่หยุด)
-        guard AXIsProcessTrusted() else { return }
+        guard AXIsProcessTrusted() else {
+            // Don't spam the system prompt mid-dictation; nudge once per session.
+            promptAccessibilityOnce()
+            print("⚠️ Accessibility off — text left on clipboard (⌘V to paste)")
+            NotificationCenter.default.post(
+                name: .whisperPasteNeedsAccessibility,
+                object: nil
+            )
+            return
+        }
 
-        // Small delay to ensure clipboard is set before simulating keystroke
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            let src = CGEventSource(stateID: .combinedSessionState)
-            let v = CGKeyCode(kVK_ANSI_V)
-            let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true)
-            down?.flags = .maskCommand
-            let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false)
-            up?.flags = .maskCommand
-            down?.post(tap: .cghidEventTap)
-            up?.post(tap: .cghidEventTap)
+        // Let the target app regain focus after hotkey release / overlay hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if insertViaAccessibility(text) { return }
+            simulateCommandV()
         }
     }
 
-    /// ถามสิทธิ์ Accessibility แค่ครั้งเดียวต่อ session (เรียกตอนเปิดแอป)
+    /// Best path: replace selected text (or insert at caret) via AX — works when ⌘V is flaky.
+    @discardableResult
+    private static func insertViaAccessibility(_ text: String) -> Bool {
+        let system = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        ) == .success, let focusedRef else { return false }
+
+        let el = focusedRef as! AXUIElement
+
+        // 1) Replace selection / insert at caret (preferred)
+        if AXUIElementSetAttributeValue(
+            el, kAXSelectedTextAttribute as CFString, text as CFTypeRef
+        ) == .success {
+            return true
+        }
+
+        // 2) Some fields only expose AXValue — append/replace whole value carefully
+        var valueRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
+           let existing = valueRef as? String {
+            var rangeRef: CFTypeRef?
+            var insertion = existing + text
+            if AXUIElementCopyAttributeValue(
+                el, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+            ) == .success,
+               let range = rangeRef,
+               CFGetTypeID(range) == AXValueGetTypeID() {
+                var cfRange = CFRange()
+                if AXValueGetValue(range as! AXValue, .cfRange, &cfRange),
+                   cfRange.location >= 0,
+                   cfRange.location <= existing.utf16.count {
+                    let start = existing.utf16.index(
+                        existing.utf16.startIndex,
+                        offsetBy: cfRange.location,
+                        limitedBy: existing.utf16.endIndex
+                    ) ?? existing.utf16.endIndex
+                    let endOffset = min(cfRange.location + max(cfRange.length, 0), existing.utf16.count)
+                    let end = existing.utf16.index(
+                        existing.utf16.startIndex,
+                        offsetBy: endOffset,
+                        limitedBy: existing.utf16.endIndex
+                    ) ?? existing.utf16.endIndex
+                    let startS = String.Index(start, within: existing) ?? existing.endIndex
+                    let endS = String.Index(end, within: existing) ?? existing.endIndex
+                    insertion = existing.replacingCharacters(in: startS..<endS, with: text)
+                }
+            }
+            if AXUIElementSetAttributeValue(
+                el, kAXValueAttribute as CFString, insertion as CFTypeRef
+            ) == .success {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func simulateCommandV() {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        let v = CGKeyCode(kVK_ANSI_V)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false) else {
+            return
+        }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        // hid tap first; session tap as backup for some sandboxed targets
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            down.post(tap: .cgSessionEventTap)
+            up.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    /// Prompt until trusted (safe to call repeatedly; system dialog only when needed).
     static func promptAccessibilityOnce() {
-        guard !didPrompt, !AXIsProcessTrusted() else { return }
+        if AXIsProcessTrusted() { return }
+        // Allow a fresh prompt after rebuilds / each cold launch
+        if didPrompt { return }
         didPrompt = true
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        // Also jump to the Accessibility pane so the user can flip Whisper on
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
+
+    static func resetPromptFlag() { didPrompt = false }
+}
+
+extension Notification.Name {
+    static let whisperPasteNeedsAccessibility = Notification.Name("whisperPasteNeedsAccessibility")
 }

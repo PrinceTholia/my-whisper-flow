@@ -64,6 +64,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .whisperPasteNeedsAccessibility)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.controller.status = "⚠️ Enable Accessibility — text is on clipboard (⌘V)"
+                self?.controller.stage = .error("Enable Accessibility for auto-paste")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    if case .error = self?.controller.stage { self?.controller.stage = .idle }
+                }
+            }
+            .store(in: &cancellables)
+
         // Sparkle auto-updater (checks SUFeedURL on launch + daily)
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
