@@ -5,16 +5,7 @@ import Carbon.HIToolbox
 /// Known modifier key codes (for modifier-only hotkeys like Fn alone)
 private let kVK_Function: UInt32 = 63
 private let modifierKeyCodes: Set<UInt32> = [
-    63,  // Fn
-    55,  // Command (left)
-    54,  // Command (right)
-    56,  // Shift (left)
-    60,  // Shift (right)
-    58,  // Option (left)
-    61,  // Option (right)
-    59,  // Control (left)
-    62,  // Control (right)
-    57,  // Caps Lock
+    63, 55, 54, 56, 60, 58, 61, 59, 62, 57,
 ]
 
 /// Hotkey configuration: keyCode + modifiers + mode (toggle or hold)
@@ -22,25 +13,24 @@ struct HotkeyConfig: Codable, Equatable {
     var keyCode: UInt32
     var modifiers: UInt
     var isHoldMode: Bool
-    var isModifierOnly: Bool  // true if the hotkey IS a modifier key (e.g., Fn alone)
+    var isModifierOnly: Bool
 
-    /// Human-readable shortcut string (e.g., "⌃⌥Space" or "Fn")
     var displayString: String {
         if isModifierOnly {
-            let flags = NSEvent.ModifierFlags(rawValue: modifiers)
+            let flags = NSEvent.modifierFlags(rawValue: modifiers)
             if flags.contains(.function) { return "Fn" }
             if flags.contains(.control) { return "⌃" }
             if flags.contains(.option) { return "⌥" }
             if flags.contains(.shift) { return "⇧" }
             if flags.contains(.command) { return "⌘" }
-            return "Modifier"
+            return "modifier"
         }
 
         var parts: [String] = []
-        if modifiers & UInt(NSEvent.ModifierFlags.control.rawValue) != 0 { parts.append("⌃") }
-        if modifiers & UInt(NSEvent.ModifierFlags.option.rawValue) != 0 { parts.append("⌥") }
-        if modifiers & UInt(NSEvent.ModifierFlags.shift.rawValue) != 0 { parts.append("⇧") }
-        if modifiers & UInt(NSEvent.ModifierFlags.command.rawValue) != 0 { parts.append("⌘") }
+        if modifiers & UInt(NSEvent.modifierFlags.control.rawValue) != 0 { parts.append("⌃") }
+        if modifiers & UInt(NSEvent.modifierFlags.option.rawValue) != 0 { parts.append("⌥") }
+        if modifiers & UInt(NSEvent.modifierFlags.shift.rawValue) != 0 { parts.append("⇧") }
+        if modifiers & UInt(NSEvent.modifierFlags.command.rawValue) != 0 { parts.append("⌘") }
 
         let keyNames: [UInt32: String] = [
             UInt32(kVK_Space): "Space",
@@ -55,15 +45,17 @@ struct HotkeyConfig: Codable, Equatable {
     }
 
     static let `default` = HotkeyConfig(
-        keyCode: kVK_Function,  // Fn
-        modifiers: UInt(NSEvent.ModifierFlags.function.rawValue),
+        keyCode: kVK_Function,
+        modifiers: UInt(NSEvent.modifierFlags.function.rawValue),
         isHoldMode: true,
         isModifierOnly: true
     )
 }
 
-/// Manages global hotkey monitoring — supports toggle/hold modes and modifier-only keys (e.g., Fn)
-/// Uses both local AND global NSEvent monitors for reliable detection everywhere
+/// Global hotkey manager.
+/// For Fn (modifier-only + hold):
+///   • Hold Fn  → push-to-talk (release to stop)
+///   • Double-tap Fn → hands-free until Fn tapped again
 class HotkeyManager {
     static let shared = HotkeyManager()
 
@@ -71,16 +63,19 @@ class HotkeyManager {
     private var localMonitor: Any?
     private var config: HotkeyConfig
     private var isHolding = false
-    private var modifierKeyDown = false  // for modifier-only hotkeys
-    private var lastModifierPress: TimeInterval = 0  // for double-tap toggle
+    private var modifierKeyDown = false
+    private var lastModifierPress: TimeInterval = 0
     private let doubleTapInterval: TimeInterval = 0.4
 
-    /// Called on activation (toggle: flip recording; hold: start recording)
+    /// Hands-free (double-tap) session — ignore key-up until next tap.
+    private(set) var handsFreeActive = false
+    private var pendingHoldStop: DispatchWorkItem?
+
     var onKeyDown: (() -> Void)?
-    /// Called on deactivation (hold mode: stop recording; modifier-only: key released)
     var onKeyUp: (() -> Void)?
-    /// Returns true while recording — lets toggle mode stop with a single tap (start still needs double-tap)
     var isActive: (() -> Bool)?
+    /// Fired when hands-free starts/stops (for UI hint).
+    var onHandsFreeChanged: ((Bool) -> Void)?
 
     private let defaultsKey = "hotkey.config"
 
@@ -100,12 +95,12 @@ class HotkeyManager {
         if let data = try? JSONEncoder().encode(newConfig) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
         }
+        handsFreeActive = false
+        pendingHoldStop?.cancel()
         restartMonitors()
     }
 
-    func start() {
-        restartMonitors()
-    }
+    func start() { restartMonitors() }
 
     func stop() {
         if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
@@ -114,18 +109,13 @@ class HotkeyManager {
 
     private func restartMonitors() {
         stop()
-
         let eventTypes: NSEvent.EventTypeMask = [.keyDown, .keyUp, .flagsChanged]
-
-        // Global monitor: catches events sent to OTHER apps
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventTypes) { [weak self] event in
             self?.handleEvent(event)
         }
-
-        // Local monitor: catches events when THIS app is focused (Settings window, etc.)
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: eventTypes) { [weak self] event in
             self?.handleEvent(event)
-            return event  // pass through to the app
+            return event
         }
     }
 
@@ -137,18 +127,12 @@ class HotkeyManager {
         }
     }
 
-    /// Handle regular key+modifier hotkeys (e.g., ⌃⌥Space)
     private func handleKeyEvent(_ event: NSEvent) {
         guard event.type == .keyDown || event.type == .keyUp else { return }
-
         let eventFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let configFlags = NSEvent.ModifierFlags(rawValue: config.modifiers)
+        let configFlags = NSEvent.modifierFlags(rawValue: config.modifiers)
             .intersection(.deviceIndependentFlagsMask)
-
-        guard UInt32(event.keyCode) == config.keyCode,
-              eventFlags == configFlags else {
-            return
-        }
+        guard UInt32(event.keyCode) == config.keyCode, eventFlags == configFlags else { return }
 
         if event.type == .keyDown {
             if config.isHoldMode {
@@ -166,25 +150,38 @@ class HotkeyManager {
         }
     }
 
-    /// Handle modifier-only hotkeys (e.g., Fn alone)
-    /// Modifier keys generate flagsChanged events, not keyDown/keyUp
+    /// Fn hybrid: hold = PTT, double-tap = hands-free toggle.
     private func handleModifierEvent(_ event: NSEvent) {
         guard event.type == .flagsChanged else { return }
-
-        let configFlags = NSEvent.ModifierFlags(rawValue: config.modifiers)
+        let configFlags = NSEvent.modifierFlags(rawValue: config.modifiers)
         let isDown = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(configFlags)
 
         if isDown && !modifierKeyDown {
-            // Modifier key pressed
             modifierKeyDown = true
-            if config.isHoldMode {
-                onKeyDown?()
-            } else if isActive?() == true {
-                // Toggle mode, currently recording: single tap stops
+            handleModifierPressed()
+        } else if !isDown && modifierKeyDown {
+            modifierKeyDown = false
+            handleModifierReleased()
+        }
+    }
+
+    private func handleModifierPressed() {
+        // Hands-free active → single tap stops
+        if handsFreeActive {
+            handsFreeActive = false
+            pendingHoldStop?.cancel()
+            lastModifierPress = 0
+            onHandsFreeChanged?(false)
+            onKeyUp?()
+            return
+        }
+
+        // Pure toggle mode (settings): keep old double-tap-to-start / tap-to-stop
+        if !config.isHoldMode {
+            if isActive?() == true {
                 lastModifierPress = 0
                 onKeyDown?()
             } else {
-                // Toggle mode, idle: require double-tap (e.g., Fn Fn) to avoid accidental triggers
                 let now = ProcessInfo.processInfo.systemUptime
                 if now - lastModifierPress < doubleTapInterval {
                     lastModifierPress = 0
@@ -193,12 +190,45 @@ class HotkeyManager {
                     lastModifierPress = now
                 }
             }
-        } else if !isDown && modifierKeyDown {
-            // Modifier key released — only matters for hold mode
-            modifierKeyDown = false
-            if config.isHoldMode {
-                onKeyUp?()
-            }
+            return
         }
+
+        // Hold mode + hybrid double-tap
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastModifierPress < doubleTapInterval {
+            // Second tap → cancel pending hold-stop, enter hands-free
+            pendingHoldStop?.cancel()
+            pendingHoldStop = nil
+            lastModifierPress = 0
+            handsFreeActive = true
+            onHandsFreeChanged?(true)
+            // Recording should already be running from first tap; if not, start
+            if isActive?() != true {
+                onKeyDown?()
+            }
+            return
+        }
+
+        lastModifierPress = now
+        // First tap / hold start
+        pendingHoldStop?.cancel()
+        pendingHoldStop = nil
+        if isActive?() != true {
+            onKeyDown?()
+        }
+    }
+
+    private func handleModifierReleased() {
+        guard config.isHoldMode else { return }
+        guard !handsFreeActive else { return } // ignore release during hands-free
+
+        // Delay stop so a quick second tap can cancel and go hands-free
+        pendingHoldStop?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.handsFreeActive else { return }
+            self.onKeyUp?()
+        }
+        pendingHoldStop = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapInterval, execute: work)
     }
 }

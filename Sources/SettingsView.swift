@@ -42,13 +42,16 @@ struct SettingsView: View {
                         }
                     }
 
+                    Text("Hold Fn to talk · Double-tap Fn for hands-free (tap Fn again to stop)")
+                        .font(.caption2).foregroundColor(.secondary)
+
                     Toggle("Hold to talk (press & hold to record, release to stop)", isOn: $hotkeyConfig.isHoldMode)
                         .font(.caption)
                         .onChange(of: hotkeyConfig.isHoldMode) { _ in
                             HotkeyManager.shared.updateConfig(hotkeyConfig)
                         }
 
-                    Text("Toggle mode: double-tap to start, single tap to stop (modifier keys like Fn) · Hold mode: press and hold to record")
+                    Text("When hold is on: hold = push-to-talk, double-tap = hands-free. When off: double-tap starts, tap stops.")
                         .font(.caption2).foregroundColor(.secondary)
                 }
                 .onChange(of: hotkeyConfig.keyCode) { _ in HotkeyManager.shared.updateConfig(hotkeyConfig) }

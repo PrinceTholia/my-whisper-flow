@@ -246,6 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         case .transcribing: return "waveform.circle"
         case .correcting: return "sparkles"
         case .done: return "checkmark.circle.fill"
+        case .copied: return "doc.on.clipboard"
         case .error: return "exclamationmark.triangle.fill"
         case .idle: return "mic"
         }
@@ -253,7 +254,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
 
     private func setupPanel() {
         let hosting = NSHostingView(rootView: FloatingStatusView(controller: controller))
-        let rect = NSRect(x: 0, y: 0, width: 200, height: 72)
+        let rect = NSRect(x: 0, y: 0, width: 260, height: 72)
         panel = NSPanel(contentRect: rect,
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -273,12 +274,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
             panel.setFrameOrigin(NSPoint(x: f.midX - panel.frame.width / 2,
                                          y: f.minY + 72))
         }
+        // Resize panel to fit current hosting view
+        panel.setContentSize(NSSize(width: 260, height: 72))
         panel.orderFrontRegardless()
     }
 
     private func hidePanel() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            if !self.controller.isRecording { self.panel.orderOut(nil) }
+            if !self.controller.isRecording,
+               self.controller.stage == .idle {
+                self.panel.orderOut(nil)
+            }
         }
     }
 
@@ -290,8 +296,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
         mgr.onKeyDown = { [weak self] in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                // Hybrid hold / hands-free both use start; toggle() for pure toggle mode
                 if HotkeyManager.shared.currentConfig.isHoldMode {
-                    self.controller.start()
+                    if HotkeyManager.shared.handsFreeActive {
+                        // Already recording in hands-free from first tap of double-tap
+                        if !self.controller.isRecording {
+                            self.controller.start()
+                        }
+                    } else {
+                        self.controller.start()
+                    }
                 } else {
                     self.controller.toggle()
                 }
@@ -306,6 +320,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
 
         mgr.isActive = { [weak self] in
             self?.controller.isRecording ?? false
+        }
+
+        mgr.onHandsFreeChanged = { [weak self] active in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if active {
+                    self.controller.status = "Hands-free — tap Fn to stop"
+                }
+            }
         }
 
         mgr.start()

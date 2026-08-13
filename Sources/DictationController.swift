@@ -10,7 +10,8 @@ enum Stage: Equatable {
     case recording
     case transcribing
     case correcting
-    case done(String)
+    case done(String)          // auto-pasted at caret
+    case copied                // no caret — clipboard only; show ⌘V hint
     case error(String)
 }
 
@@ -85,14 +86,28 @@ class DictationController: ObservableObject {
                 let final = CorrectionDictionary.shared.apply(to: text)
                 let snippet = String(final.prefix(28))
                 self.processing = false
-                // Keep a brief "done" flash, then paste while the target app still has focus
-                self.status = "✅ " + snippet
-                self.stage = .done(snippet)
-                Paster.paste(final)
+
+                let outcome = Paster.paste(final)
                 DictionaryLearner.watchAfterPaste(final)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+
+                switch outcome {
+                case .inserted:
+                    self.status = "✅ Pasted"
+                    self.stage = .done(snippet.isEmpty ? "Pasted" : snippet)
+                case .copiedOnly:
+                    if !AXIsProcessTrusted() {
+                        self.status = "Copied — enable Accessibility for auto-paste"
+                        self.stage = .copied
+                    } else {
+                        self.status = "Copied — press ⌘V to paste"
+                        self.stage = .copied
+                    }
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + (outcome == .copiedOnly ? 2.8 : 1.0)) { [weak self] in
                     guard let self = self else { return }
                     if case .done = self.stage { self.stage = .idle }
+                    if case .copied = self.stage { self.stage = .idle }
                 }
             }
         }

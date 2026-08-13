@@ -1,4 +1,5 @@
 import SwiftUI
+import ApplicationServices
 
 /// Floating overlay matching the approved pill preview (compact Flow-like capsule).
 /// Fixed outer frame so NSHostingView inside NSPanel never renegotiates constraints.
@@ -9,7 +10,7 @@ struct FloatingStatusView: View {
         ZStack {
             content
         }
-        .frame(width: 200, height: 64)
+        .frame(width: 260, height: 64)
         .animation(.easeInOut(duration: 0.18), value: controller.stage)
     }
 
@@ -27,7 +28,13 @@ struct FloatingStatusView: View {
         case .done(let snippet):
             StatusPill(icon: "checkmark.circle.fill",
                        iconColor: Color(red: 0.45, green: 0.85, blue: 0.55),
-                       text: snippet.isEmpty ? "Done" : snippet, spin: false)
+                       text: snippet.isEmpty ? "Pasted" : snippet, spin: false)
+        case .copied:
+            StatusPill(icon: "doc.on.clipboard",
+                       iconColor: Color(red: 0.55, green: 0.75, blue: 1.0),
+                       text: AXIsProcessTrusted()
+                         ? "Copied — ⌘V to paste"
+                         : "Copied — turn on Accessibility", spin: false)
         case .error(let msg):
             StatusPill(icon: "exclamationmark.triangle.fill",
                        iconColor: Color(red: 1.0, green: 0.72, blue: 0.35),
@@ -127,7 +134,7 @@ struct StatusPill: View {
                 .truncationMode(.tail)
         }
         .padding(.horizontal, 16)
-        .frame(minWidth: 148, maxWidth: 180, minHeight: 44, maxHeight: 44)
+        .frame(minWidth: 160, maxWidth: 240, minHeight: 44, maxHeight: 44)
         .modifier(PillChrome())
     }
 }
