@@ -17,7 +17,7 @@ struct HotkeyConfig: Codable, Equatable {
 
     var displayString: String {
         if isModifierOnly {
-            let flags = NSEvent.modifierFlags(rawValue: modifiers)
+            let flags = NSEvent.ModifierFlags(rawValue: modifiers)
             if flags.contains(.function) { return "Fn" }
             if flags.contains(.control) { return "⌃" }
             if flags.contains(.option) { return "⌥" }
@@ -27,10 +27,10 @@ struct HotkeyConfig: Codable, Equatable {
         }
 
         var parts: [String] = []
-        if modifiers & UInt(NSEvent.modifierFlags.control.rawValue) != 0 { parts.append("⌃") }
-        if modifiers & UInt(NSEvent.modifierFlags.option.rawValue) != 0 { parts.append("⌥") }
-        if modifiers & UInt(NSEvent.modifierFlags.shift.rawValue) != 0 { parts.append("⇧") }
-        if modifiers & UInt(NSEvent.modifierFlags.command.rawValue) != 0 { parts.append("⌘") }
+        if modifiers & UInt(NSEvent.ModifierFlags.control.rawValue) != 0 { parts.append("⌃") }
+        if modifiers & UInt(NSEvent.ModifierFlags.option.rawValue) != 0 { parts.append("⌥") }
+        if modifiers & UInt(NSEvent.ModifierFlags.shift.rawValue) != 0 { parts.append("⇧") }
+        if modifiers & UInt(NSEvent.ModifierFlags.command.rawValue) != 0 { parts.append("⌘") }
 
         let keyNames: [UInt32: String] = [
             UInt32(kVK_Space): "Space",
@@ -46,7 +46,7 @@ struct HotkeyConfig: Codable, Equatable {
 
     static let `default` = HotkeyConfig(
         keyCode: kVK_Function,
-        modifiers: UInt(NSEvent.modifierFlags.function.rawValue),
+        modifiers: UInt(NSEvent.ModifierFlags.function.rawValue),
         isHoldMode: true,
         isModifierOnly: true
     )
@@ -130,7 +130,7 @@ class HotkeyManager {
     private func handleKeyEvent(_ event: NSEvent) {
         guard event.type == .keyDown || event.type == .keyUp else { return }
         let eventFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let configFlags = NSEvent.modifierFlags(rawValue: config.modifiers)
+        let configFlags = NSEvent.ModifierFlags(rawValue: config.modifiers)
             .intersection(.deviceIndependentFlagsMask)
         guard UInt32(event.keyCode) == config.keyCode, eventFlags == configFlags else { return }
 
@@ -153,7 +153,7 @@ class HotkeyManager {
     /// Fn hybrid: hold = PTT, double-tap = hands-free toggle.
     private func handleModifierEvent(_ event: NSEvent) {
         guard event.type == .flagsChanged else { return }
-        let configFlags = NSEvent.modifierFlags(rawValue: config.modifiers)
+        let configFlags = NSEvent.ModifierFlags(rawValue: config.modifiers)
         let isDown = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(configFlags)
 
         if isDown && !modifierKeyDown {
