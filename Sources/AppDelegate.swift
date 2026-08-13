@@ -263,7 +263,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
 
     private func setupPanel() {
         let hosting = NSHostingView(rootView: FloatingStatusView(controller: controller))
-        let rect = NSRect(x: 0, y: 0, width: 220, height: 64)
+        let rect = NSRect(x: 0, y: 0, width: 200, height: 72)
         panel = NSPanel(contentRect: rect,
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -280,7 +280,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDele
     private func showPanel() {
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
-            // Sit near bottom-center like a Flow-style pill (clear of Dock)
+            // Bottom-center like the preview mock (~72pt above Dock)
             panel.setFrameOrigin(NSPoint(x: f.midX - panel.frame.width / 2,
                                          y: f.minY + 72))
         }
