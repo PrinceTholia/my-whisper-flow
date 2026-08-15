@@ -73,6 +73,11 @@ enum Paster {
             return .inserted
         }
 
+        if isWhatsApp(target) {
+            pasteIntoWhatsApp(app: target)
+            return .inserted
+        }
+
         // Normal apps: NEVER open Settings here (steals focus).
         // NEVER skip paste because AXIsProcessTrusted() lied.
         // Do NOT activateIgnoringOtherApps — that breaks caret focus.
@@ -90,6 +95,24 @@ enum Paster {
             }
         }
         return .inserted
+    }
+
+    private static func isWhatsApp(_ app: NSRunningApplication?) -> Bool {
+        let id = (app?.bundleIdentifier ?? "").lowercased()
+        if id.contains("whatsapp") { return true }
+        let name = (app?.localizedName ?? "").lowercased()
+        return name.contains("whatsapp")
+    }
+
+    /// WhatsApp’s composer is a Chromium/Electron field. AX insert often returns
+    /// success but writes nothing, which used to skip ⌘V. Don’t activate the app
+    /// (that can move focus out of the message box). Clipboard + delayed ⌘V only.
+    private static func pasteIntoWhatsApp(app: NSRunningApplication?) {
+        _ = app
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            simulateCommandV()
+            print("✅ WhatsApp paste via ⌘V (skipped AX insert)")
+        }
     }
 
     private static func isTerminalApp(_ app: NSRunningApplication?) -> Bool {
@@ -169,15 +192,15 @@ enum Paster {
     }
 
     @discardableResult
-    private static func pasteViaSystemEvents(processName: String?) -> Bool {
+    private static func pasteViaSystemEvents(processName: String?, activate: Bool = true) -> Bool {
         let script: String
         if let processName {
             let escaped = escapeAppleScript(processName)
+            let front = activate ? "set frontmost to true\n                " : ""
             script = """
             tell application "System Events"
               tell process "\(escaped)"
-                set frontmost to true
-                keystroke "v" using command down
+                \(front)keystroke "v" using command down
               end tell
             end tell
             """
