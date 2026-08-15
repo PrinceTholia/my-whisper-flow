@@ -107,8 +107,7 @@ enum Paster {
     /// WhatsApp’s composer is a Chromium/Electron field. AX insert often returns
     /// success but writes nothing, which used to skip ⌘V. Don’t activate the app
     /// (that can move focus out of the message box). Clipboard + delayed ⌘V only.
-    private static func pasteIntoWhatsApp(app: NSRunningApplication?) {
-        _ = app
+    private static func pasteIntoWhatsApp(app _: NSRunningApplication?) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
             simulateCommandV()
             print("✅ WhatsApp paste via ⌘V (skipped AX insert)")
